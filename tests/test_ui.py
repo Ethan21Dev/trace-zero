@@ -472,3 +472,24 @@ async def test_flows_view_follow_stream_and_packets(tmp_path, sample_pcap):
         await pilot.press("c")
         await pilot.press("s")
         assert main.flow_sort == ("bytes", False)
+
+
+async def test_export_packets_key(tmp_path, sample_pcap):
+    from trace_zero.parsing.reader import read_capture
+
+    app, s = make_app(tmp_path, sample_pcap)
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        await pilot.press("slash")
+        app.screen.query_one(Input).value = "proto:dns"
+        await pilot.press("enter")
+        await pilot.press("X")
+        assert isinstance(app.screen, PromptScreen)
+        target = tmp_path / "out" / "dns.pcapng"
+        app.screen.query_one(Input).value = str(target)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        exported = read_capture(target).packets
+        assert exported and all(p.app == "DNS" for p in exported)
+        assert any(e.kind == "export" and "Wireshark filter: dns" in e.message for e in s.store.events(s.investigation.id))

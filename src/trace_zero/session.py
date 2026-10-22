@@ -18,6 +18,8 @@ from trace_zero.analysis.timeline import Timeline
 from trace_zero.config import Config
 from trace_zero.models import ParseResult
 from trace_zero.analysis.streams import Stream, reassemble
+from trace_zero.analysis.wireshark import to_wireshark
+from trace_zero.parsing.writer import export_frames
 from trace_zero.parsing.reader import CancelFn, ProgressFn, read_capture, read_frames
 from trace_zero.storage import Investigation, Store
 
@@ -159,6 +161,38 @@ class Session:
         frames = self.frame_bytes(set(flow.frames))
         timestamps = {no: idx.packet(no).ts for no in flow.frames if idx.packet(no) is not None}
         return reassemble(flow, frames, timestamps)
+
+    # -- packet export ---------------------------------------------------------------------
+    def window_frames(self) -> list[int]:
+        """Frame numbers currently shown: active filter intersected with the time window."""
+        stats = self.window_stats()
+        if stats is None:
+            return []
+        pk = self.capture.index.packets
+        return [pk[i].no for i in self.view.slice_rows(stats.i0, stats.i1)]
+
+    def wireshark_filter(self) -> tuple[str, list[str]]:
+        t0 = self.capture.index.t0 if self.capture else 0.0
+        expr, notes = to_wireshark(self.filter, t0)
+        if self.timeline is not None and self.capture is not None:
+            lo, hi = self.timeline.window()
+            if (lo, hi) != (self.capture.index.t0, self.capture.index.t1):
+                window = f"frame.time_epoch >= {lo:.6f} && frame.time_epoch <= {hi:.6f}"
+                expr = f"({expr}) && {window}" if expr else window
+        return expr, notes
+
+    def export_packets(self, path: Path) -> tuple[int, str, list[str]]:
+        """Write the packets currently shown to a new PCAPNG. Safe in a worker thread."""
+        assert self.capture is not None
+        frames = set(self.window_frames())
+        expr, notes = self.wireshark_filter()
+        r = self.capture.result
+        comment = (
+            f"Exported by TRACE//ZERO from {r.file.name} (sha256 {r.file.sha256}); "
+            f"investigation '{self.investigation.name}'; selection: {expr or 'all packets'}"
+        )
+        count = export_frames(r.file, frames, Path(path), comment)
+        return count, expr, notes
 
     def evidence_filter(self, finding: Finding) -> PacketFilter:
         return frames_filter(set(finding.frames), f"evidence:{finding.id}")

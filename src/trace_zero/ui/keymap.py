@@ -20,6 +20,7 @@ KEYMAP: list[tuple[str, list[tuple[str, str]]]] = [
         [
             ("h", "host explorer"),
             ("n", "network map (topology of the time window)"),
+            ("c", "flows / connections; enter follows the reassembled stream"),
             ("p", "packet explorer"),
             ("f", "findings (possible anomalies)"),
             ("b", "bookmarks, notes and activity journal"),
@@ -58,6 +59,7 @@ KEYMAP: list[tuple[str, list[tuple[str, str]]]] = [
             ("x", "show / hide raw bytes and full scapy dissection of a packet"),
             ("delete", "delete the selected bookmark or note (journal view)"),
             ("e", "export JSON summary + HTML report"),
+            ("X", "export the packets shown (filter + window) to PCAPNG; Wireshark filter copied"),
             ("r", "rename investigation"),
             ("ctrl+n", "new investigation"),
             ("l", "list / switch investigations"),

@@ -30,7 +30,7 @@ from trace_zero.models import PacketRecord, parse_tcp_flags
 
 Predicate = Callable[[PacketRecord], bool]
 
-PROTOCOLS = {"tcp", "udp", "icmp", "icmpv6", "arp", "ipv4", "ipv6", "dns", "mdns", "llmnr", "http", "tls"}
+PROTOCOLS = {"tcp", "udp", "icmp", "icmpv6", "arp", "ipv4", "ipv6", "dns", "mdns", "llmnr", "http", "tls", "dhcp"}
 _CMP_RE = re.compile(r"^(len|t)(>=|<=|>|<|=)(.+)$")
 _OPS = {">": operator.gt, "<": operator.lt, ">=": operator.ge, "<=": operator.le, "=": operator.eq}
 

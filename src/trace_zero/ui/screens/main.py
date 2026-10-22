@@ -24,6 +24,7 @@ from trace_zero.analysis.flows import build_flows, flows_in_window
 from trace_zero.analysis.index import H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS_OUT, CaptureView, WindowStats, ip_sort_key
 from trace_zero.analysis.timeline import WindowMode
 from trace_zero.export import export_all
+from trace_zero.export.report import slug
 from trace_zero.models import fmt_bytes, fmt_duration, fmt_ts
 from trace_zero.parsing.reader import CaptureError, ParseCancelled, read_frame_bytes, validate_capture_path
 from trace_zero.parsing.scapy_bridge import dissect_frame
@@ -115,6 +116,7 @@ class MainScreen(Screen):
         Binding("s", "sort", "sort"),
         Binding("S,shift+s", "sort_reverse", "reverse sort"),
         Binding("e", "export", "export"),
+        Binding("X,shift+x", "export_pcap", "export packets"),
         Binding("r", "rename", "rename"),
         Binding("ctrl+n", "new_investigation", "new investigation"),
         Binding("l", "investigations", "investigations"),
@@ -1384,6 +1386,56 @@ class MainScreen(Screen):
                 self._refresh_journal()
 
         self.app.push_screen(PromptScreen("EXPORT", "Directory for the JSON summary and HTML report:", str(s.config.export_dir)), done)
+
+    def action_export_pcap(self) -> None:
+        s = self.session
+        if s.capture is None:
+            self.app.notify("open a capture first (o)", severity="warning")
+            return
+        count = len(s.window_frames())
+        if not count:
+            self.app.notify("no packets in the current view to export", severity="warning")
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        default = Path(s.config.export_dir).expanduser() / f"{slug(s.investigation.name)}-{stamp}-packets.pcapng"
+
+        def done(target: str | None) -> None:
+            if target:
+                self.busy = "EXPORTING"
+                self._refresh_status()
+                self._pcap_worker(Path(target).expanduser())
+
+        self.app.push_screen(
+            PromptScreen("EXPORT PACKETS", f"Write the {count:,} packets currently shown (filter + time window) to PCAPNG:", str(default)),
+            done,
+        )
+
+    @work(thread=True, exclusive=True, group="pcap")
+    def _pcap_worker(self, target: Path) -> None:
+        try:
+            count, expr, notes = self.session.export_packets(target)
+            result = (count, expr, notes, None)
+        except (CaptureError, OSError) as exc:
+            result = (0, "", [], str(exc))
+        self.app.call_from_thread(self._pcap_done, target, *result)
+
+    def _pcap_done(self, target: Path, count: int, expr: str, notes: list[str], error: str | None) -> None:
+        self.busy = ""
+        self._refresh_status()
+        if error:
+            self.app.notify(f"packet export failed: {error}", severity="error")
+            return
+        self.session.store.log(self.session.investigation.id, "export", f"exported {count} packets to {target.name}; Wireshark filter: {expr or '(none)'}")
+        if expr:
+            self.app.copy_to_clipboard(expr)
+        msg = f"{count:,} packets -> {target}"
+        if expr:
+            msg += f"\nWireshark filter (copied to clipboard):\n{expr}"
+        for note in notes:
+            msg += f"\nnote: {note}"
+        self.app.notify(msg, title="packets exported", timeout=15)
+        if self.center_view == "journal":
+            self._refresh_journal()
 
     def action_rename(self) -> None:
         def done(name: str | None) -> None:

@@ -28,6 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--headless", action="store_true", help="analyse without the TUI and print a summary")
     p.add_argument("--json", type=Path, help="headless: write the JSON summary here")
     p.add_argument("--html", type=Path, help="headless: write the HTML report here")
+    p.add_argument("--filter", metavar="EXPR", help="headless: filter expression (same syntax as / in the TUI)")
+    p.add_argument("--pcap", type=Path, metavar="OUT", help="headless: export the (filtered) packets to PCAPNG")
     p.add_argument("--generate-sample", type=Path, metavar="FILE", help="write the synthetic sample capture and exit")
     p.add_argument("--format", choices=("pcap", "pcapng"), default="pcap", help="format for --generate-sample")
     p.add_argument("--version", action="version", version=f"{PRODUCT} {__version__}")
@@ -66,6 +68,15 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
         return 1
     session = Session(cfg, store, inv)
     session.attach(loaded)
+    if args.filter:
+        from trace_zero.analysis.filters import FilterError
+
+        try:
+            flt = session.compile(args.filter)
+        except FilterError as exc:
+            print(f"error: invalid filter: {exc}", file=sys.stderr)
+            return 2
+        session.apply_view(flt, session.build_view(flt))
     r, idx = loaded.result, loaded.index
     print(f"{PRODUCT}  {TAGLINE}")
     print(f"investigation  {inv.name}")
@@ -80,14 +91,23 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     print(f"possible anomalies (heuristic, not proof): {len(loaded.findings)}")
     for f in loaded.findings:
         print(f"  {f.severity:<6} {f.rule}  {f.title}  [confidence {f.confidence}, {f.frame_count} frames]")
+    if args.filter:
+        expr, notes = session.wireshark_filter()
+        print(f"filter         {args.filter}  ->  {len(session.view):,} packets")
+        print(f"wireshark      {expr}")
+        for note in notes:
+            print(f"               note: {note}")
     try:
+        if args.pcap:
+            count, _expr, _notes = session.export_packets(args.pcap)
+            print(f"pcapng         {args.pcap}  ({count:,} packets)")
         if args.json or args.html:
             report = build_report(session)
             if args.json:
                 print(f"json           {write_json(report, args.json)}")
             if args.html:
                 print(f"html           {write_html(report, args.html)}")
-    except OSError as exc:
+    except (OSError, CaptureError) as exc:
         print(f"error: cannot write export: {exc}", file=sys.stderr)
         return 1
     store.close()
