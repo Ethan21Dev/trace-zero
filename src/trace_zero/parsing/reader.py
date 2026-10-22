@@ -170,12 +170,14 @@ def read_capture(
     limits: Limits | None = None,
     progress: ProgressFn | None = None,
     cancelled: CancelFn | None = None,
+    info: FileInfo | None = None,
 ) -> ParseResult:
     """Import a capture. Raises CaptureError or ParseCancelled."""
     limits = limits or Limits()
     path, fmt = validate_capture_path(raw_path, limits)
     started = time.monotonic()
-    info = file_info(path, fmt, progress, cancelled)
+    if info is None:
+        info = file_info(path, fmt, progress, cancelled)
     packets: list[PacketRecord] = []
     warnings: list[str] = []
     linktypes: set[int] = set()

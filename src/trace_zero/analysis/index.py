@@ -13,7 +13,7 @@ import ipaddress
 from bisect import bisect_left, bisect_right
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 from trace_zero.models import PacketRecord, ParseResult
 
@@ -222,6 +222,10 @@ class HostMeta:
         return classify_ip(self.ip)
 
 
+_HOST_FIELDS = [f.name for f in fields(HostMeta)]
+_HOST_COUNTERS = {"ttls", "protocols", "dports_initiated", "ports_accepting", "tls_client_fps", "tls_server_fps"}
+
+
 @dataclass(frozen=True)
 class TimelineEvent:
     ts: float
@@ -232,9 +236,13 @@ class TimelineEvent:
 
 
 class CaptureIndex:
-    def __init__(self, result: ParseResult) -> None:
+    def __init__(self, result: ParseResult, snapshot: dict | None = None) -> None:
         self.result = result
         self.packets: list[PacketRecord] = result.packets
+        self._views: OrderedDict[str, CaptureView] = OrderedDict()
+        if snapshot is not None:
+            self._restore(snapshot)
+            return
         pk = self.packets
         n = len(pk)
         if all(pk[i].ts <= pk[i + 1].ts for i in range(n - 1)):
@@ -253,7 +261,41 @@ class CaptureIndex:
         self.total_bytes = 0
         self._pending_names: dict[str, dict[str, int]] = {}
         self._build()
-        self._views: OrderedDict[str, CaptureView] = OrderedDict()
+
+    # -- cache support: plain-data snapshot of everything _build derives ----------------
+    def snapshot(self) -> dict:
+        full = self.view(None, key="")
+        return {
+            "order": self.order,
+            "sorted_in_file": self.sorted_in_file,
+            "t0": self.t0,
+            "t1": self.t1,
+            "hosts": [tuple(dict(v) if isinstance(v, Counter) else v for v in (getattr(m, f) for f in _HOST_FIELDS)) for m in self.hosts.values()],
+            "host_positions": self.host_positions,
+            "events": [(e.ts, e.kind, e.label, e.ref, e.frame) for e in self.events],
+            "proto_counts": dict(self.proto_counts),
+            "total_bytes": self.total_bytes,
+            "blocks": full.blocks,
+        }
+
+    def _restore(self, snap: dict) -> None:
+        n = len(self.packets)
+        self.order = snap["order"]
+        if len(self.order) != n:
+            raise ValueError("index snapshot does not match the packet list")
+        self.sorted_in_file = snap["sorted_in_file"]
+        self.t0, self.t1 = snap["t0"], snap["t1"]
+        self.by_no = {p.no: i for i, p in enumerate(self.packets)} if n and self.packets[-1].no != n else None
+        self.hosts = {}
+        for values in snap["hosts"]:
+            kw = {f: (Counter(v) if f in _HOST_COUNTERS else v) for f, v in zip(_HOST_FIELDS, values)}
+            self.hosts[kw["ip"]] = HostMeta(**kw)
+        self.host_positions = snap["host_positions"]
+        self.events = [TimelineEvent(*e) for e in snap["events"]]
+        self.proto_counts = Counter(snap["proto_counts"])
+        self.total_bytes = snap["total_bytes"]
+        self._pending_names = {}
+        self.cache_view("", CaptureView(self, None, blocks=snap["blocks"]))
 
     @property
     def span(self) -> float:
@@ -390,7 +432,7 @@ class CaptureIndex:
 class CaptureView:
     """The capture through a filter: time-sorted positions plus block aggregates."""
 
-    def __init__(self, index: CaptureIndex, flt: Callable[[PacketRecord], bool] | None) -> None:
+    def __init__(self, index: CaptureIndex, flt: Callable[[PacketRecord], bool] | None, blocks: list | None = None) -> None:
         self.index = index
         pk = index.packets
         if flt is None:
@@ -399,7 +441,9 @@ class CaptureView:
             self.rows = [i for i in index.order if flt(pk[i])]
         self.ts: list[float] = [pk[i].ts for i in self.rows]
         self.blocks: list[tuple[dict, dict, int]] = []
-        for start in range(0, len(self.rows), BLOCK):
+        if blocks is not None and flt is None and len(blocks) == -(-len(self.rows) // BLOCK):
+            self.blocks = blocks  # restored from cache (unfiltered view only)
+        for start in range(0, len(self.rows) if not self.blocks else 0, BLOCK):
             hosts: dict = {}
             edges: dict = {}
             size = 0

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import sys
 from pathlib import Path
@@ -30,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--html", type=Path, help="headless: write the HTML report here")
     p.add_argument("--filter", metavar="EXPR", help="headless: filter expression (same syntax as / in the TUI)")
     p.add_argument("--pcap", type=Path, metavar="OUT", help="headless: export the (filtered) packets to PCAPNG")
+    p.add_argument("--no-cache", action="store_true", help="parse from scratch; do not read or write the capture cache")
+    p.add_argument("--clear-cache", action="store_true", help="delete all cached parsed captures and exit")
     p.add_argument("--generate-sample", type=Path, metavar="FILE", help="write the synthetic sample capture and exit")
     p.add_argument("--format", choices=("pcap", "pcapng"), default="pcap", help="format for --generate-sample")
     p.add_argument("--version", action="version", version=f"{PRODUCT} {__version__}")
@@ -62,7 +65,7 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     try:
         store = Store(cfg.db_path)
         inv = store.open_or_create(args.investigation)
-        loaded = load_capture(args.capture, cfg)
+        loaded = load_capture(args.capture, cfg, use_cache=not args.no_cache)
     except (CaptureError, StorageError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -82,7 +85,7 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     print(f"investigation  {inv.name}")
     print(f"capture        {r.file.name}  ({r.file.fmt}, {r.file.size:,} bytes)")
     print(f"sha256         {r.file.sha256}")
-    print(f"packets        {len(r.packets):,}   hosts {len(idx.hosts):,}   parse {r.elapsed_s:.2f}s")
+    print(f"packets        {len(r.packets):,}   hosts {len(idx.hosts):,}   load {r.elapsed_s:.2f}s" + ("  (from cache)" if r.cached else ""))
     if r.truncated:
         print(f"TRUNCATED      {r.stop_reason}")
     for w in r.warnings[:10]:
@@ -128,7 +131,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.db:
-        cfg = Config(limits=cfg.limits, anomaly=cfg.anomaly, db_path=args.db, export_dir=cfg.export_dir)
+        cfg = dataclasses.replace(cfg, db_path=args.db)
+    if args.no_cache:
+        cfg = dataclasses.replace(cfg, limits=dataclasses.replace(cfg.limits, cache_max_mb=0))
+    if args.clear_cache:
+        from trace_zero.cache import CaptureCache
+
+        n = CaptureCache(cfg.cache_dir, 1).clear()
+        print(f"removed {n} cache file(s) from {cfg.cache_dir}")
+        return 0
     _setup_logging()
     if args.headless:
         return _headless(args, cfg)

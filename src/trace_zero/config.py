@@ -30,6 +30,8 @@ class Limits:
     max_raw_bytes: int = 65535
     # Maximum DNS payload size handed to the DNS decoder.
     max_dns_payload: int = 4096
+    # On-disk cache of parsed captures (0 disables). Evicts least recently used.
+    cache_max_mb: int = 2048
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,7 @@ class Config:
     anomaly: AnomalyConfig = field(default_factory=AnomalyConfig)
     db_path: Path = field(default_factory=lambda: default_data_dir() / "investigations.db")
     export_dir: Path = field(default_factory=lambda: Path.home() / "trace-zero-exports")
+    cache_dir: Path = field(default_factory=lambda: default_data_dir() / "cache")
 
 
 def _merge_section(obj: Any, data: dict[str, Any], section: str) -> Any:
@@ -112,7 +115,7 @@ def _merge_section(obj: Any, data: dict[str, Any], section: str) -> Any:
             value = float(value)
         if not isinstance(value, expected) or isinstance(value, bool) != isinstance(current, bool):
             raise ConfigError(f"[{section}] {key}: expected {expected.__name__}")
-        if isinstance(value, (int, float)) and value <= 0:
+        if isinstance(value, (int, float)) and (value < 0 or (value == 0 and key != "cache_max_mb")):
             raise ConfigError(f"[{section}] {key}: must be positive")
         updates[key] = value
     return replace(obj, **updates)
@@ -139,4 +142,5 @@ def load_config(path: Path | None = None) -> Config:
         raise ConfigError(f"unknown config sections: {', '.join(sorted(unknown))}")
     db_path = Path(paths["db"]).expanduser() if "db" in paths else cfg.db_path
     export_dir = Path(paths["exports"]).expanduser() if "exports" in paths else cfg.export_dir
-    return Config(limits=limits, anomaly=anomaly, db_path=db_path, export_dir=export_dir)
+    cache_dir = Path(paths["cache"]).expanduser() if "cache" in paths else cfg.cache_dir
+    return Config(limits=limits, anomaly=anomaly, db_path=db_path, export_dir=export_dir, cache_dir=cache_dir)

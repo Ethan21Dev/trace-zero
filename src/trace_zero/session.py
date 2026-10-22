@@ -7,10 +7,14 @@ the headless CLI and the test suite drive it directly.
 
 from __future__ import annotations
 
+import gc
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from trace_zero.analysis.anomaly import Finding, detect
+from trace_zero.cache import CaptureCache
 from trace_zero.analysis.filters import PacketFilter, compile_filter, frames_filter
 from trace_zero.analysis.flows import Flow, build_flows
 from trace_zero.analysis.index import CaptureIndex, CaptureView, WindowStats
@@ -20,7 +24,7 @@ from trace_zero.models import ParseResult
 from trace_zero.analysis.streams import Stream, reassemble
 from trace_zero.analysis.wireshark import to_wireshark
 from trace_zero.parsing.writer import export_frames
-from trace_zero.parsing.reader import CancelFn, ProgressFn, read_capture, read_frames
+from trace_zero.parsing.reader import CancelFn, ProgressFn, file_info, read_capture, read_frames, validate_capture_path
 from trace_zero.storage import Investigation, Store
 
 
@@ -38,19 +42,75 @@ class LoadedCapture:
         return next((f for f in self.findings if f.id == fid), None)
 
 
-def load_capture(path: str | Path, config: Config, progress: ProgressFn | None = None, cancelled: CancelFn | None = None) -> LoadedCapture:
-    """Parse, index and analyse a capture. Safe to call from a worker thread."""
-    result = read_capture(path, config.limits, progress, cancelled)
+@contextmanager
+def _gc_paused():
+    """Restoring from cache allocates hundreds of thousands of objects that all stay alive;
+    the cyclic GC would rescan them repeatedly for nothing. (Not used while parsing: scapy's
+    DNS dissection creates reference cycles that must be collected.)"""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def load_capture(
+    path: str | Path,
+    config: Config,
+    progress: ProgressFn | None = None,
+    cancelled: CancelFn | None = None,
+    use_cache: bool = True,
+) -> LoadedCapture:
+    """Parse, index and analyse a capture. Safe to call from a worker thread.
+
+    With the cache enabled, a capture whose SHA-256 was seen before is restored
+    without parsing; findings and flows are reused when the heuristic settings
+    are unchanged.
+    """
+    started = time.monotonic()
+    resolved, fmt = validate_capture_path(path, config.limits)
+    info = file_info(resolved, fmt, progress, cancelled)
+    cache = CaptureCache(config.cache_dir, config.limits.cache_max_mb if use_cache else 0)
+    with _gc_paused():
+        restored = cache.load_packets(info, config.limits)
+    if restored is not None:
+        if progress:
+            progress("cache", 0, info.size, info.size)
+        packets, linktypes, warnings, truncated, stop_reason = restored
+        result = ParseResult(info, packets, linktypes, warnings, truncated, stop_reason, 0.0, cached=True)
+    else:
+        result = read_capture(resolved, config.limits, progress, cancelled, info=info)
+        cache.store_packets(info, config.limits, result)
     if progress:
         progress("indexing", len(result.packets), result.file.size, result.file.size)
-    index = CaptureIndex(result)
-    if progress:
-        progress("analysing", len(result.packets), result.file.size, result.file.size)
-    findings = detect(index, config.anomaly)
-    if progress:
-        progress("flows", len(result.packets), result.file.size, result.file.size)
-    # Precompute the flow table for the unfiltered view while still off the UI thread.
-    index.view(None, key="").flows_cache = build_flows(index.packets, index.order)
+    index = None
+    if restored is not None:
+        snapshot = cache.load_index(info, config.limits)
+        if snapshot is not None:
+            try:
+                with _gc_paused():
+                    index = CaptureIndex(result, snapshot=snapshot)
+            except (KeyError, TypeError, ValueError):
+                index = None  # stale or damaged snapshot: rebuild below
+    if index is None:
+        index = CaptureIndex(result)
+        cache.store_index(info, config.limits, index)
+    analysis = cache.load_analysis(info, config.limits, config.anomaly) if restored is not None else None
+    if analysis is not None:
+        findings, flows = analysis
+    else:
+        if progress:
+            progress("analysing", len(result.packets), result.file.size, result.file.size)
+        findings = detect(index, config.anomaly)
+        if progress:
+            progress("flows", len(result.packets), result.file.size, result.file.size)
+        flows = build_flows(index.packets, index.order)
+        cache.store_analysis(info, config.limits, config.anomaly, findings, flows)
+    # Flow table for the unfiltered view, computed (or restored) off the UI thread.
+    index.view(None, key="").flows_cache = flows
+    result.elapsed_s = time.monotonic() - started
     return LoadedCapture(result, index, findings)
 
 

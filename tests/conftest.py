@@ -12,6 +12,14 @@ from trace_zero.session import Session, load_capture
 from trace_zero.storage import Store
 
 
+def pytest_configure(config):
+    """Keep tests away from the real data directory (database, cache, log)."""
+    import os
+    import tempfile
+
+    os.environ["TRACE_ZERO_HOME"] = tempfile.mkdtemp(prefix="tz-test-home-")
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     """Fail loudly if anything under test tries to put a packet on a network."""
@@ -78,7 +86,7 @@ def loaded_sample(sample_pcap):
 
 @pytest.fixture
 def config(tmp_path) -> Config:
-    return Config(limits=Limits(), db_path=tmp_path / "test.db", export_dir=tmp_path / "exports")
+    return Config(limits=Limits(), db_path=tmp_path / "test.db", export_dir=tmp_path / "exports", cache_dir=tmp_path / "cache")
 
 
 @pytest.fixture

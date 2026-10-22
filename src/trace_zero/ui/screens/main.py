@@ -291,7 +291,7 @@ class MainScreen(Screen):
 
     def _on_progress(self, stage: str, n: int, done: int, total: int) -> None:
         pct = int(done * 100 / total) if total else 100
-        label = {"hashing": "HASHING", "parsing": "PARSING", "indexing": "INDEXING", "analysing": "ANALYSING", "flows": "FLOWS"}.get(stage, stage.upper())
+        label = {"hashing": "HASHING", "parsing": "PARSING", "indexing": "INDEXING", "analysing": "ANALYSING", "flows": "FLOWS", "cache": "FROM CACHE"}.get(stage, stage.upper())
         detail = f"{label} {pct}%" + (f"  {n:,} pkts" if n else "")
         self.query_one(HeaderBar).set_state(status=("busy", detail + "  (esc cancels)"))
         self.busy = detail
@@ -343,6 +343,8 @@ class MainScreen(Screen):
         if not self.compact:
             self.query_one("#hosts-table", VirtualTable).focus()
         msg = f"{len(r.packets):,} packets · {len(idx.hosts):,} hosts · {len(loaded.findings)} possible anomalies · {r.elapsed_s:.1f}s"
+        if r.cached:
+            msg += " \u00b7 restored from cache (verified by SHA-256)"
         if not r.packets:
             self.app.notify("the capture contains no packets", title=r.file.name, severity="warning")
         elif r.truncated:

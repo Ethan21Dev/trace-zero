@@ -329,3 +329,4 @@ class ParseResult:
     truncated: bool = False  # parsing stopped early (limit, damage, cancellation)
     stop_reason: str | None = None
     elapsed_s: float = 0.0
+    cached: bool = False  # restored from the on-disk cache instead of parsed

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import statistics
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -379,6 +380,7 @@ def _volume_spikes(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
         totals[min(nbins - 1, int((p.ts - index.t0) / cfg.spike_bin_s))] += p.wirelen
     med, mad = _robust(totals)
     scale = 1.4826 * mad if mad > 0 else max(1.0, med * 0.1)
+    times = [pk[i].ts for i in index.order]
     flags = [
         v >= cfg.spike_min_bytes and v >= cfg.spike_min_factor * max(med, 1.0) and (v - med) / scale >= cfg.spike_z
         for v in totals
@@ -391,12 +393,10 @@ def _volume_spikes(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
         pair_bytes: Counter = Counter()
         pair_frames: dict[tuple, list[int]] = defaultdict(list)
         span_frames = 0
-        for i in index.order:
+        start = bisect_left(times, lo)
+        stop = bisect_left(times, hi) if b < nbins else len(times)
+        for i in index.order[start:stop]:
             p = pk[i]
-            if p.ts < lo:
-                continue
-            if p.ts >= hi and b < nbins:
-                break
             span_frames += 1
             if p.src and p.dst:
                 pair_bytes[(p.src, p.dst)] += p.wirelen
