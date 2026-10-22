@@ -51,7 +51,7 @@ class TimelinePanel(Widget, can_focus=True):
         height = max(1, self.size.height)
         snap = self.snap
         if snap is None:
-            return Text("no capture loaded — press o to open a PCAP/PCAPNG file", style=theme.S_DIM)
+            return Text("no capture loaded — press o to open a PCAP/PCAPNG file, or F for live capture", style=theme.S_DIM)
         tl = snap.timeline
         counts = snap.counts
         bins = len(counts)

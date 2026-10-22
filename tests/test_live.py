@@ -356,7 +356,7 @@ async def _until(pilot, cond, timeout=15.0):
 
 
 async def test_tui_follows_a_growing_file_and_finalises(tmp_path, sample_pcap):
-    from trace_zero.ui.screens.dialogs import ChoiceScreen, ConfirmScreen, PromptScreen
+    from trace_zero.ui.screens.dialogs import ChoiceScreen, ConfirmScreen, OpenCaptureScreen, PromptScreen
 
     full = sample_pcap.read_bytes()
     path = tmp_path / "growing.pcap"
@@ -367,8 +367,8 @@ async def test_tui_follows_a_growing_file_and_finalises(tmp_path, sample_pcap):
         await pilot.press("F")
         assert isinstance(app.screen, ChoiceScreen)
         await pilot.press("f")
-        assert isinstance(app.screen, PromptScreen)
-        app.screen.query_one("Input").value = str(path)
+        assert isinstance(app.screen, OpenCaptureScreen) and app.screen.follow
+        app.screen.query_one("#path").value = str(path)
         await pilot.press("enter")
         await pilot.pause(0.3)
         assert s.live is not None and s.capture is None
@@ -483,5 +483,24 @@ async def test_starting_live_clears_the_previous_capture(tmp_path, sample_pcap):
         assert s.capture is None and main.center_view == "empty"
         assert main.query_one("#hosts-table", VirtualTable).count == 0
         main.stop_live("test over")
+        await _until(pilot, lambda: s.live is None)
+    store.close()
+
+
+async def test_follow_browser_accepts_a_file_that_is_still_empty(tmp_path):
+    """A writer that has only just started has written nothing yet; following must still start."""
+    from trace_zero.ui.screens.dialogs import OpenCaptureScreen
+
+    empty = tmp_path / "just-started.pcapng"
+    empty.write_bytes(b"")
+    app, s, store = _app(tmp_path)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.press("F", "f")
+        assert isinstance(app.screen, OpenCaptureScreen)
+        app.screen.query_one("#path").value = str(empty)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert s.live is not None and s.live.path == empty.resolve()
+        app.main.stop_live("test over")
         await _until(pilot, lambda: s.live is None)
     store.close()

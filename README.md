@@ -65,12 +65,18 @@ sha256sum -c SHA256SUMS --ignore-missing
 chmod +x trace-zero-*-linux-x86_64 && ./trace-zero-*-linux-x86_64 --version
 ```
 
+On Windows you can simply double-click the `.exe`: the start screen offers `o` (open a capture)
+and `F` (live mode), and the file browser starts in your Downloads folder (then in the folder you
+used last), with quick jumps to Desktop, Documents, home, the exports folder and every drive.
+The executables are not code-signed: Windows SmartScreen asks you to confirm (*More info*,
+*Run anyway*), and on macOS run `xattr -d com.apple.quarantine` on the file first.
+
 ### From a release wheel
 
 Each GitHub release also carries the Python package (`trace_zero-X.Y.Z-py3-none-any.whl`):
 
 ```bash
-pipx install ./trace_zero-0.1.0-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
+pipx install ./trace_zero-0.1.1-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
 ```
 
 It is not on PyPI yet; the release workflow publishes there once PyPI publishing is enabled

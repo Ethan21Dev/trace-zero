@@ -37,6 +37,7 @@ from trace_zero.session import LoadedCapture, Selection, Session, load_capture, 
 from trace_zero.storage import StorageError
 from trace_zero.ui import inspect, theme
 from trace_zero.ui.mapgeo import MapEdge, MapNode
+from trace_zero.ui.places import initial_dir, places
 from trace_zero.ui.screens.dialogs import (
     ChoiceScreen,
     ConfirmScreen,
@@ -79,11 +80,16 @@ def _splash() -> Text:
     t = Text(justify="center")
     t.append(f"{PRODUCT}\n", theme.S_CYAN_B)
     t.append(f"{TAGLINE}\n\n", theme.S_FAINT)
-    t.append("o", theme.S_CYAN)
-    t.append("  open a PCAP / PCAPNG capture\n", theme.S_DIM)
-    t.append("?", theme.S_CYAN)
-    t.append("  keyboard reference\n\n", theme.S_DIM)
-    t.append("offline analysis │ read-only evidence │ no network access", theme.S_FAINT)
+    for key, label in (
+        ("o", "open a PCAP / PCAPNG capture"),
+        ("F", "live: capture on a network interface, or follow a growing capture file"),
+        ("l", "investigations"),
+        ("?", "keyboard reference"),
+        ("q", "quit"),
+    ):
+        t.append(key, theme.S_CYAN)
+        t.append(f"  {label}\n", theme.S_DIM)
+    t.append("\nread-only evidence │ passive live capture │ nothing leaves this machine", theme.S_FAINT)
     return t
 
 
@@ -469,7 +475,7 @@ class MainScreen(Screen):
         status = self.query_one(StatusBar)
         keys: list[tuple[str, str]]
         if s.capture is None:
-            keys = [("o", "open"), ("?", "help"), ("l", "investigations"), ("a", "note"), ("q", "quit")]
+            keys = [("o", "open"), ("F", "live" if s.live is None else "stop live"), ("?", "help"), ("l", "investigations"), ("a", "note"), ("q", "quit")]
             if self.busy:
                 keys = [("esc", "cancel import")] + keys
             status.set_state(keys=keys, filter_text="", range_text="-", app_status=self.busy or "READY")
@@ -1151,20 +1157,18 @@ class MainScreen(Screen):
         if self.session.live is not None:
             self.app.notify("a live capture is running: stop it first (F)", severity="warning")
             return
-        cap = self.session.capture
-        start = Path(cap.result.file.path).parent if cap else Path.cwd()
-
         def done(path: str | None) -> None:
             if path:
+                self._remember_folder(path)
                 self.start_load(path)
 
-        self.app.push_screen(OpenCaptureScreen(start, self.session.config.limits), done)
+        self.app.push_screen(self._browser(), done)
 
     def action_add_capture(self) -> None:
+        """Merge another capture (e.g. a second sensor) onto the current timeline."""
         if self.session.live is not None:
             self.app.notify("a live capture is running: stop it first (F)", severity="warning")
             return
-        """Merge another capture (e.g. a second sensor) onto the current timeline."""
         cap = self.session.capture
         if cap is None:
             self.action_open()
@@ -1177,9 +1181,27 @@ class MainScreen(Screen):
             if Path(path).resolve() in {Path(p).resolve() for p in current}:
                 self.app.notify("that capture is already on the timeline", severity="warning")
                 return
+            self._remember_folder(path)
             self.start_load(current + [path])
 
-        self.app.push_screen(OpenCaptureScreen(Path(current[-1]).parent, self.session.config.limits), done)
+        self.app.push_screen(self._browser(title="ADD CAPTURE TO TIMELINE"), done)
+
+    def _browser(self, follow: bool = False, title: str = "OPEN CAPTURE") -> OpenCaptureScreen:
+        """File browser starting in the last folder used (never the launcher's System32)."""
+        s = self.session
+        try:
+            last = s.store.get_pref("last_folder")
+        except StorageError:
+            last = None
+        if last is None and s.capture is not None and not s.capture.result.live:
+            last = str(Path(s.capture.result.file.path).parent)
+        return OpenCaptureScreen(initial_dir(last), s.config.limits, places(s.config.export_dir), follow=follow, title=title)
+
+    def _remember_folder(self, path: str) -> None:
+        try:
+            self.session.store.set_pref("last_folder", str(Path(path).parent))
+        except StorageError:
+            pass  # a convenience only
 
     def action_filter(self) -> None:
         s = self.session
@@ -1633,11 +1655,11 @@ class MainScreen(Screen):
 
     def _ask_follow_path(self) -> None:
         def got(path: str | None) -> None:
-            if path and path.strip():
-                self.start_live(path.strip())
+            if path:
+                self._remember_folder(path)
+                self.start_live(path)
 
-        default = str(Path(self.session.config.export_dir).expanduser())
-        self.app.push_screen(PromptScreen("FOLLOW CAPTURE FILE", "Path of the growing .pcap / .pcapng file:", default), got)
+        self.app.push_screen(self._browser(follow=True, title="FOLLOW A GROWING CAPTURE FILE"), got)
 
     def _choose_interface(self) -> None:
         try:

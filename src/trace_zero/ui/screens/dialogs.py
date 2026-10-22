@@ -100,6 +100,11 @@ class HelpScreen(ModalScreen[None]):
 
 
 class CaptureTree(DirectoryTree):
+    # Plain glyphs instead of Textual's default emoji icons.
+    ICON_NODE = "▸ "
+    ICON_NODE_EXPANDED = "▾ "
+    ICON_FILE = "  "
+
     def filter_paths(self, paths: Iterable[Path]) -> Iterable[Path]:
         out = []
         for p in paths:
@@ -114,42 +119,90 @@ class CaptureTree(DirectoryTree):
 
 
 class OpenCaptureScreen(ModalScreen[str | None]):
+    """Pick a capture: type a path, jump to a place, or browse the folder tree.
+
+    ``follow=True`` is used by live mode: the file may still be empty because its
+    writer has only just started, so only "is a regular file" is checked.
+    """
+
     DEFAULT_CSS = _css("OpenCaptureScreen") + """
-    OpenCaptureScreen > #frame { height: 80%; }
+    OpenCaptureScreen > #frame { height: 90%; }
+    OpenCaptureScreen #places { height: auto; max-height: 9; margin-top: 1; }
     OpenCaptureScreen CaptureTree { height: 1fr; border: solid #262c2f; background: #0a0c0d; margin-top: 1; }
     OpenCaptureScreen CaptureTree:focus { border: solid #21767b; }
     """
-    BINDINGS = [Binding("escape", "cancel", "cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel"),
+        Binding("backspace", "parent", "parent folder", show=False),
+    ]
 
-    def __init__(self, start: Path, limits: Limits) -> None:
+    def __init__(self, start: Path, limits: Limits, places: list[tuple[str, Path]] | None = None, follow: bool = False, title: str = "OPEN CAPTURE") -> None:
         super().__init__()
         self.start = start
         self.limits = limits
+        self.places = places or []
+        self.follow = follow
+        self.title_text = title
 
     def compose(self) -> ComposeResult:
         with Vertical(id="frame") as frame:
-            frame.border_title = "OPEN CAPTURE"
-            yield Static("Path to a .pcap / .pcapng file. Files are opened read-only.", classes="hint")
-            yield Input(placeholder="/path/to/capture.pcapng", id="path")
+            frame.border_title = self.title_text
+            hint = (
+                "The capture file another program is writing (.pcap / .pcapng)."
+                if self.follow
+                else "A .pcap / .pcapng file. Files are opened read-only."
+            )
+            yield Static(hint + " Type a file or folder path, pick a place, or browse.", classes="hint", markup=False)
+            yield Input(placeholder="path to a capture file or folder", id="path")
             yield Static("", id="msg", classes="error", markup=False)
-            yield CaptureTree(self.start, id="tree")
-            yield Static("enter open  │  tab switch input/tree  │  esc cancel", classes="hint")
+            yield VirtualTable([Col("PLACE", 12), Col("FOLDER")], id="places")
+            tree = CaptureTree(self.start, id="tree")
+            tree.border_title = clean(str(self.start), 120)
+            yield tree
+            yield Static(
+                "enter open / go to  \u2502  tab next: path, places, folders  \u2502  backspace parent folder  \u2502  esc cancel",
+                classes="hint",
+            )
 
     def on_mount(self) -> None:
+        table = self.query_one("#places", VirtualTable)
+        places = self.places
+        table.set_data(len(places), lambda i: [Text(places[i][0], style=theme.S_CYAN), clean(str(places[i][1]), 200)], lambda i: i, notify=False)
+        table.display = bool(places)
+        table.styles.height = min(len(places), 8) + 1
         self.query_one("#path", Input).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def _browse(self, folder: Path) -> None:
+        tree = self.query_one("#tree", CaptureTree)
+        tree.path = folder
+        tree.border_title = clean(str(folder), 120)
+        self.query_one("#msg", Static).update("")
+
+    def action_parent(self) -> None:
+        tree = self.query_one("#tree", CaptureTree)
+        if self.focused is not tree:
+            return
+        current = Path(tree.path)
+        if current.parent != current:
+            self._browse(current.parent)
+
     def _try(self, raw: str) -> None:
         msg = self.query_one("#msg", Static)
-        candidate = Path(raw.strip()).expanduser() if raw.strip() else None
+        candidate = Path(raw.strip().strip('"')).expanduser() if raw.strip() else None
         if candidate is not None and candidate.is_dir():
-            self.query_one("#tree", CaptureTree).path = candidate
-            msg.update("")
+            self._browse(candidate)
+            return
+        if self.follow:
+            if candidate is None or not candidate.is_file():
+                msg.update("not an existing file")
+                return
+            self.dismiss(str(candidate.resolve()))
             return
         try:
-            path, _fmt = validate_capture_path(raw, self.limits)
+            path, _fmt = validate_capture_path(raw.strip().strip('"'), self.limits)
         except CaptureError as exc:
             msg.update(clean(str(exc)))
             return
@@ -158,6 +211,11 @@ class OpenCaptureScreen(ModalScreen[str | None]):
     @on(Input.Submitted, "#path")
     def submitted(self, event: Input.Submitted) -> None:
         self._try(event.value)
+
+    @on(VirtualTable.Activated, "#places")
+    def place_chosen(self, event: VirtualTable.Activated) -> None:
+        self._browse(self.places[int(event.key)][1])
+        self.query_one("#tree", CaptureTree).focus()
 
     @on(DirectoryTree.FileSelected)
     def file_selected(self, event: DirectoryTree.FileSelected) -> None:

@@ -504,6 +504,14 @@ class Store:
     def delete_saved_filter(self, name: str) -> None:
         self._exec("DELETE FROM saved_filters WHERE name=?", (name,))
 
+    # -- preferences ------------------------------------------------------------------------------
+    def get_pref(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key=?", ("pref:" + key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_pref(self, key: str, value: str) -> None:
+        self._exec("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT (key) DO UPDATE SET value=excluded.value", ("pref:" + key, value[:4000]))
+
     def rekey_capture(self, inv_id: int, old_sha: str, new_sha: str) -> int:
         """Move bookmarks, notes, marks and triage from one capture identity to another
         (a live capture's provisional id to its final SHA-256). Returns rows moved."""

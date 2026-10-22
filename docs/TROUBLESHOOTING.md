@@ -19,6 +19,16 @@
 Many frames shown in amber with `[...]` in the info column: those frames have decode issues
 (truncated headers, invalid lengths, malformed DNS). Filter them with `error`.
 
+## Finding files
+
+* **The file browser starts somewhere odd** - it opens in the folder you used last, else the
+  current folder if it contains captures, else Downloads, else your home folder. Starting the
+  `.exe` by double-click or from a browser's download list used to land in `C:\Windows\System32`;
+  that no longer happens.
+* **Getting around** - type any file or folder path and press `enter` (quoted paths from
+  Explorer's *Copy as path* work), `tab` to the *Places* list (Downloads, Desktop, Documents,
+  home, exports, drives), and `backspace` in the folder tree to go up a level.
+
 ## Display problems
 
 * **Boxes, question marks or misaligned lines** - the font lacks box-drawing or geometric glyphs.

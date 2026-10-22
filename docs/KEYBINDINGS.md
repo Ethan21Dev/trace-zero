@@ -13,7 +13,7 @@ text field is open, so typing `q` or `space` into a filter never quits or starts
 | `?` | help (this screen) |
 | `q` | back to previous view; quit at the top level |
 | `ctrl+q` | quit immediately |
-| `o` | open a PCAP / PCAPNG capture |
+| `o` | open a PCAP / PCAPNG capture (tab: places such as Downloads; backspace: parent folder) |
 | `O` | add another capture to the timeline (multi-sensor) |
 | `F` | live: follow a growing capture file, or capture with dumpcap / tcpdump; F again stops |
 | `/` | search and filter packets (up/down history, ctrl+s save, tab saved filters) |
