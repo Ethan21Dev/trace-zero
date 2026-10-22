@@ -222,6 +222,13 @@ def render_html(report: dict[str, Any]) -> str:
     if facts and facts["timeline_events"]:
         out.append("<h2>Capture timeline (first observations)</h2>")
         out.append(_table(["time (UTC)", "kind", "event", "frame"], [[t["time_utc"], t["kind"], t["description"], t["frame"]] for t in facts["timeline_events"]], {3}))
+    coc = report.get("chain_of_custody")
+    if coc:
+        out.append("<h2>Chain of custody</h2>")
+        out.append(f'<p class="notice">{e(coc["notice"])}</p>')
+        if coc["warnings"]:
+            out.append('<p class="warn">Integrity warnings:</p><ul>' + "".join(f"<li>{e(w)}</li>" for w in coc["warnings"]) + "</ul>")
+        out.append(_table(["time (UTC)", "kind", "record"], [[c["at_utc"], c["kind"], c["message"]] for c in coc["events"]]))
     out.append("<h2>Activity journal</h2>")
     out.append(_table(["time (UTC)", "kind", "activity"], [[j["at_utc"], j["kind"], j["message"]] for j in report["activity_journal"]]))
     out.append(f"<footer>{e(gen['product'])} {e(gen['version'])} &middot; {e(gen['tagline'])}</footer></main></body></html>\n")

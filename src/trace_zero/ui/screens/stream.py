@@ -163,11 +163,11 @@ class FollowStreamScreen(ModalScreen[str | None]):
                 if data:
                     path = directory / f"{base}.{label}.bin"
                     atomic_write_bytes(path, data)
+                    self.session.record_export(path, f"{label} stream bytes of {self.flow.ref}")
                     written.append(str(path))
         except OSError as exc:
             self.app.notify(f"save failed: {exc}", severity="error")
             return
-        self.session.store.log(self.session.investigation.id, "export", f"saved stream bytes: {', '.join(Path(w).name for w in written)}")
         self.app.notify("\n".join(written) or "no payload to save", title="stream saved", timeout=8)
 
     def action_packets(self) -> None:

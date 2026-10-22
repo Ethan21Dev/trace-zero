@@ -24,6 +24,7 @@ from trace_zero.analysis.filters import FilterError, PacketFilter, frames_filter
 from trace_zero.analysis.flows import build_flows, flows_in_window
 from trace_zero.analysis.index import H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS_OUT, CaptureView, WindowStats, ip_sort_key
 from trace_zero.analysis.timeline import WindowMode
+from trace_zero import custody
 from trace_zero.export import export_all
 from trace_zero.export.report import slug
 from trace_zero.models import fmt_bytes, fmt_duration, fmt_rel, fmt_ts
@@ -121,6 +122,7 @@ class MainScreen(Screen):
         Binding("S,shift+s", "sort_reverse", "reverse sort"),
         Binding("e", "export", "export"),
         Binding("X,shift+x", "export_pcap", "export packets"),
+        Binding("V,shift+v", "verify", "verify evidence"),
         Binding("T,shift+t", "triage", "triage finding"),
         Binding("d", "diff", "compare windows"),
         Binding("D,shift+d", "clear_diff", "clear baseline"),
@@ -356,6 +358,8 @@ class MainScreen(Screen):
             self.app.notify(f"{msg}\nimport truncated: {r.stop_reason}", title=r.file.name, severity="warning", timeout=8)
         else:
             self.app.notify(msg, title=r.file.name)
+        for warning in self.session.custody_warnings:
+            self.app.notify(warning, title="CHAIN OF CUSTODY", severity="error", timeout=20)
 
     def _rebuild_event_markers(self) -> None:
         """Significant times for < / >: first observations, visible findings and named marks."""
@@ -739,7 +743,10 @@ class MainScreen(Screen):
         def row(i: int) -> list:
             at, typ, target, detail, _ = rows[i]
             style = {"BOOKMARK": theme.S_CYAN, "NOTE": theme.S_AMBER, "LOG": theme.S_DIM, "SUPPRESS": theme.S_AMBER, "MARK": theme.S_GREEN}[typ]
-            return [Text(fmt_ts(at, True)[:19], style=theme.S_DIM), Text(typ, style=style), clean(target, 80), Text(clean(detail, 300), style=theme.S_AMBER if typ == "NOTE" else theme.S_TEXT)]
+            detail_style = theme.S_AMBER if typ == "NOTE" else theme.S_TEXT
+            if typ == "LOG" and (target == "custody" or (target == "verify" and "MATCH sha256" not in detail)):
+                style = detail_style = theme.S_RED  # evidence integrity problem
+            return [Text(fmt_ts(at, True)[:19], style=theme.S_DIM), Text(typ, style=style), clean(target, 80), Text(clean(detail, 300), style=detail_style)]
 
         table.set_data(len(rows), row, lambda i: rows[i][4][:2], keep_key=table.current_key(), notify=False)
         # Plain Text: the investigation name is user-typed and must not be parsed as markup.
@@ -1536,10 +1543,41 @@ class MainScreen(Screen):
             done,
         )
 
+    def action_verify(self) -> None:
+        if self.session.capture is None:
+            self.app.notify("open a capture first (o)", severity="warning")
+            return
+        self.busy = "VERIFYING"
+        self._refresh_status()
+        self._verify_worker()
+
+    @work(thread=True, exclusive=True, group="verify")
+    def _verify_worker(self) -> None:
+        worker = get_current_worker()
+        try:
+            results = self.session.verify_evidence(lambda: worker.is_cancelled, journal=False)
+        except InterruptedError:
+            results = None
+        self.app.call_from_thread(self._verify_done, results)
+
+    def _verify_done(self, results) -> None:
+        self.busy = ""
+        self._refresh_status()
+        if results is None:
+            return
+        self.session.journal_verification(results)
+        text = "\n".join(v.describe() for v in results)
+        if all(v.ok for v in results):
+            self.app.notify(text, title="EVIDENCE VERIFIED", timeout=10)
+        else:
+            self.app.notify(text, title="EVIDENCE INTEGRITY PROBLEM", severity="error", timeout=30)
+        if self.center_view == "journal":
+            self._refresh_journal()
+
     @work(thread=True, exclusive=True, group="pcap")
     def _pcap_worker(self, target: Path) -> None:
         try:
-            count, expr, notes = self.session.export_packets(target)
+            count, expr, notes = self.session.export_packets(target, journal=False)
             result = (count, expr, notes, None)
         except (CaptureError, OSError) as exc:
             result = (0, "", [], str(exc))
@@ -1551,7 +1589,10 @@ class MainScreen(Screen):
         if error:
             self.app.notify(f"packet export failed: {error}", severity="error")
             return
-        self.session.store.log(self.session.investigation.id, "export", f"exported {count} packets to {target.name}; Wireshark filter: {expr or '(none)'}")
+        try:
+            self.session.journal_export(target, custody.read_digest(target), f"{count:,} packets; Wireshark filter: {expr or '(none)'}")
+        except (OSError, StorageError) as exc:
+            self.app.notify(f"export written but not journaled: {exc}", severity="warning")
         if expr:
             self.app.copy_to_clipboard(expr)
         msg = f"{count:,} packets -> {target}"

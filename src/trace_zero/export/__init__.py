@@ -25,7 +25,8 @@ def export_all(session, directory: Path) -> tuple[Path, Path]:
     report = build_report(session)
     write_json(report, json_path)
     write_html(report, html_path)
-    session.store.log(session.investigation.id, "export", f"exported {json_path.name} and {html_path.name}")
+    session.record_export(json_path, "JSON summary")
+    session.record_export(html_path, "HTML report")
     return json_path, html_path
 
 

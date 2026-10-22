@@ -33,6 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--pcap", type=Path, metavar="OUT", help="headless: export the (filtered) packets to PCAPNG")
     p.add_argument("--oui", type=Path, metavar="FILE", help="IEEE oui.csv or Wireshark manuf file for MAC vendor names")
     p.add_argument("--geoip", type=Path, action="append", default=[], metavar="FILE", help="MaxMind .mmdb database (repeatable: City/Country/ASN)")
+    p.add_argument("--verify", action="store_true", help="re-hash every capture recorded in the investigation (-i) and exit 0 if all match, 3 if not")
     p.add_argument("--no-cache", action="store_true", help="parse from scratch; do not read or write the capture cache")
     p.add_argument("--clear-cache", action="store_true", help="delete all cached parsed captures and exit")
     p.add_argument("--generate-sample", type=Path, metavar="FILE", help="write the synthetic sample capture and exit")
@@ -124,6 +125,40 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _verify(args: argparse.Namespace, cfg: Config) -> int:
+    """Chain of custody: compare evidence files with the hashes recorded at import."""
+    from trace_zero import custody
+    from trace_zero.storage import StorageError, Store
+
+    try:
+        store = Store(cfg.db_path)
+        inv = store.find_investigation(args.investigation) if args.investigation else (store.list_investigations() or [None])[0]
+    except StorageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if inv is None:
+        print("error: no such investigation", file=sys.stderr)
+        return 1
+    evidence = [(c["filename"], c["path"], c["sha256"]) for c in store.captures(inv.id)]
+    if not evidence:
+        print(f"investigation '{inv.name}' has no recorded captures")
+        return 0
+    results = custody.verify(evidence)
+    print(f"investigation  {inv.name}")
+    for v in results:
+        print(f"{v.verdict:<12} {v.path}")
+        print(f"             recorded {v.expected}")
+        if v.actual and not v.ok:
+            print(f"             now      {v.actual}")
+        if v.error:
+            print(f"             {v.error}")
+        store.log(inv.id, "verify", v.describe())
+    store.close()
+    bad = sum(not v.ok for v in results)
+    print(f"{len(results) - bad} of {len(results)} evidence file(s) match")
+    return 3 if bad else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.generate_sample:
@@ -150,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"removed {n} cache file(s) from {cfg.cache_dir}")
         return 0
     _setup_logging()
+    if args.verify:
+        return _verify(args, cfg)
     if args.headless:
         return _headless(args, cfg)
     for capture in args.capture:

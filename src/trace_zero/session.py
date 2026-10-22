@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from trace_zero.analysis.anomaly import Finding, detect
+from trace_zero import custody
 from trace_zero.cache import CaptureCache
 from trace_zero.enrich import Enrichment
 from trace_zero.analysis.filters import PacketFilter, compile_filter, frames_filter
@@ -222,6 +223,8 @@ class Session:
         self.view: CaptureView | None = None
         self.timeline: Timeline | None = None
         self.selection: Selection | None = None
+        # Chain-of-custody notes raised when the current capture was attached.
+        self.custody_warnings: list[str] = []
         # Offline reference data (MAC vendors, geolocation/ASN) - optional, user-supplied files.
         self.enrichment, self.enrichment_problems = Enrichment.from_paths(config.oui_path, list(config.mmdb_paths))
 
@@ -234,6 +237,16 @@ class Session:
         self.timeline = Timeline.for_span(idx.t0, idx.t1)
         self.selection = None
         r = loaded.result
+        self.custody_warnings = []
+        for info, _offset, _count in r.source_list():
+            for sha, at, inv_name in custody.changed_since_last_import(self.store.prior_hashes(info.path), info.sha256):
+                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(at))
+                self.custody_warnings.append(
+                    f"{info.name}: content differs from the import on {when} (investigation '{inv_name}', sha256 {sha[:16]}...); "
+                    f"the file at this path changed"
+                )
+        for warning in self.custody_warnings:
+            self.store.log(self.investigation.id, "custody", warning)
         for info, _offset, count in r.source_list():
             self.store.record_capture(self.investigation.id, info, count, idx.t0 if r.packets else None, idx.t1 if r.packets else None, r.truncated)
         detail = ", ".join(f"{i.name} (sha256 {i.sha256[:16]}...)" for i, _o, _c in r.source_list())
@@ -331,8 +344,12 @@ class Session:
             notes = notes + [f"frame numbers follow the merged timeline; reproduce it with: mergecap -a -w merged.pcapng {order}"]
         return expr, notes
 
-    def export_packets(self, path: Path) -> tuple[int, str, list[str]]:
-        """Write the packets currently shown to a new PCAPNG. Safe in a worker thread."""
+    def export_packets(self, path: Path, journal: bool = True) -> tuple[int, str, list[str]]:
+        """Write the packets currently shown to a new PCAPNG with a ``.sha256`` sidecar.
+
+        Safe in a worker thread with ``journal=False``; then call ``journal_export``
+        on the main thread (the investigation database is bound to it).
+        """
         assert self.capture is not None
         frames = set(self.window_frames())
         expr, notes = self.wireshark_filter()
@@ -343,7 +360,38 @@ class Session:
         )
         parts = [(info, frames, offset) for info, offset, _count in r.source_list()]
         count = export_sources(parts, Path(path), comment)
+        digest = custody.write_digest(path)
+        if journal:
+            self.journal_export(Path(path), digest, f"{count:,} packets; Wireshark filter: {expr or '(none)'}")
         return count, expr, notes
+
+    # -- chain of custody ----------------------------------------------------------------------
+    def record_export(self, path: Path, what: str) -> str:
+        """Write the ``.sha256`` sidecar for an exported file and journal its digest."""
+        digest = custody.write_digest(path)
+        self.journal_export(path, digest, what)
+        return digest
+
+    def journal_export(self, path: Path, digest: str, what: str) -> None:
+        self.store.log(self.investigation.id, "export", f"{Path(path).name} sha256 {digest} - {what}")
+
+    def evidence(self) -> list[tuple[str, str, str]]:
+        """(name, path, recorded sha256) of every capture on the current timeline."""
+        if self.capture is None:
+            return []
+        return [(i.name, i.path, i.sha256) for i, _o, _c in self.capture.result.source_list()]
+
+    def verify_evidence(self, cancelled=None, journal: bool = True) -> list[custody.Verification]:
+        """Re-hash the evidence files. With ``journal=False`` it is safe in a worker
+        thread; pass the results to ``journal_verification`` on the main thread."""
+        results = custody.verify(self.evidence(), cancelled)
+        if journal:
+            self.journal_verification(results)
+        return results
+
+    def journal_verification(self, results: list[custody.Verification]) -> None:
+        for v in results:
+            self.store.log(self.investigation.id, "verify", v.describe())
 
     def evidence_filter(self, finding: Finding) -> PacketFilter:
         return frames_filter(set(finding.frames), f"evidence:{finding.id}")

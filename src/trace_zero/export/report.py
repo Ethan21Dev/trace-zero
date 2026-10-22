@@ -64,6 +64,17 @@ def build_report(session) -> dict[str, Any]:
             "notes": [],
             "bookmarks": [],
         },
+        "chain_of_custody": {
+            "notice": "Captures are opened read-only and hashed (SHA-256) at import. Each exported file has a "
+            "<name>.sha256 sidecar; its digest is also recorded below. A report cannot contain its own hash: "
+            "check it against its sidecar (sha256sum -c).",
+            "warnings": list(getattr(session, "custody_warnings", [])),
+            "events": [
+                {"at_utc": _iso(e.at), "kind": e.kind, "message": e.message}
+                for e in store.events(inv.id)
+                if e.kind in ("capture", "custody", "verify", "export")
+            ],
+        },
         "activity_journal": [
             {"at_utc": _iso(e.at), "kind": e.kind, "message": e.message} for e in store.events(inv.id)
         ],

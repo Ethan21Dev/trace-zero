@@ -371,8 +371,8 @@ async def test_export_rename_and_new_investigation(tmp_path, sample_pcap):
         assert isinstance(app.screen, PromptScreen)
         await pilot.press("enter")
         await pilot.pause()
-        exports = sorted(p.suffix for p in (tmp_path / "exports").iterdir())
-        assert exports == [".html", ".json"]
+        exports = sorted("".join(p.suffixes) for p in (tmp_path / "exports").iterdir())
+        assert exports == [".html", ".html.sha256", ".json", ".json.sha256"]
         await pilot.press("r")
         app.screen.query_one(Input).value = "Renamed case"
         await pilot.press("enter")
@@ -683,3 +683,24 @@ async def test_command_palette_shows_markup_like_filters_verbatim(tmp_path, samp
         hit = next(h for h in hits if h.text == "filter: [red]x")
         assert hit.match_display.plain == "filter: [red]x"
         assert Content.from_markup(hit.help).plain == "dns:[b]evil"
+
+
+async def test_verify_key_reports_evidence_state(tmp_path, sample_pcap):
+    import shutil
+
+    cap = tmp_path / "ev.pcap"
+    shutil.copy(sample_pcap, cap)
+    app, s = make_app(tmp_path, cap)
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        await pilot.press("V")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        events = [e for e in s.store.events(s.investigation.id) if e.kind == "verify"]
+        assert len(events) == 1 and "MATCH sha256" in events[0].message
+        cap.write_bytes(b"tampered")
+        await pilot.press("V")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        events = [e for e in s.store.events(s.investigation.id) if e.kind == "verify"]
+        assert "MISMATCH" in events[-1].message
