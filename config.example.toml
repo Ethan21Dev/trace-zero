@@ -1,0 +1,45 @@
+# TRACE//ZERO configuration (optional).
+#
+# Copy to one of:
+#   Linux / WSL : ~/.config/trace-zero/config.toml   (or $XDG_CONFIG_HOME/trace-zero/config.toml)
+#   Windows     : %APPDATA%\trace-zero\config.toml
+# or pass explicitly:  trace-zero --config path/to/config.toml
+#
+# Every key is optional; omitted keys keep their defaults (shown below).
+
+[limits]
+max_file_mb = 1024        # captures larger than this are refused before parsing
+max_packets = 1000000     # import stops here and the capture is flagged TRUNCATED (~0.7 KB RAM per packet)
+batch_size = 5000         # packets per progress update / cancellation check
+max_raw_bytes = 65535     # cap for the raw-bytes view of one packet
+max_dns_payload = 4096    # larger DNS payloads are not decoded
+
+[anomaly]
+# TZ-R1 repeated failed connection attempts
+repeat_min_attempts = 6
+repeat_window_s = 120.0
+# TZ-R2 destination port fan-out
+fanout_min_ports = 20
+fanout_window_s = 60.0
+# TZ-R3 traffic volume spike (robust z-score over per-bin bytes)
+spike_bin_s = 1.0
+spike_min_bins = 10
+spike_z = 6.0
+spike_min_factor = 4.0
+spike_min_bytes = 20000
+# TZ-R4 DNS query spike (per source)
+dns_bin_s = 10.0
+dns_min_queries = 20
+dns_min_factor = 4.0
+# TZ-R5 frequent host-pair communication
+pair_min_pairs = 5
+pair_min_contacts = 20
+pair_z = 5.0
+pair_periodic_z = 2.0
+pair_periodic_cv = 0.25
+# supporting frame references stored per finding
+max_refs = 500
+
+[paths]
+# db = "~/.local/share/trace-zero/investigations.db"
+# exports = "~/trace-zero-exports"

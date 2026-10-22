@@ -1,0 +1,104 @@
+/* TRACE//ZERO - dark, quiet, precise. Colour marks state, not decoration. */
+
+Screen {
+    background: #0a0c0d;
+    color: #c3cacd;
+    layers: base overlay;
+}
+
+.panel {
+    border: solid #262c2f;
+    border-title-color: #6e777b;
+    border-title-style: bold;
+    border-title-align: left;
+    background: #0a0c0d;
+}
+
+.panel:focus-within {
+    border: solid #21767b;
+    border-title-color: #3cc4cc;
+}
+
+#body {
+    height: 1fr;
+}
+
+#hosts-panel {
+    width: 28;
+}
+
+#center-panel {
+    width: 1fr;
+}
+
+#inspector-panel {
+    width: 44;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#body.compact #hosts-panel,
+#body.compact #inspector-panel {
+    width: 1fr;
+}
+
+#tabs {
+    height: 1;
+    padding: 0 1;
+    background: #0e1112;
+}
+
+#switcher {
+    height: 1fr;
+}
+
+#view-empty {
+    height: 1fr;
+    content-align: center middle;
+}
+
+#view-map {
+    height: 1fr;
+}
+
+#map-canvas {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#peers-table {
+    height: 40%;
+    min-height: 4;
+    border-top: solid #262c2f;
+}
+
+#timeline-panel {
+    height: 8;
+    padding: 0 1;
+}
+
+#timeline {
+    height: 1fr;
+}
+
+#too-small {
+    display: none;
+    layer: overlay;
+    width: 100%;
+    height: 100%;
+    content-align: center middle;
+    background: #0a0c0d;
+}
+
+Toast {
+    background: #111516;
+    border-left: outer #21767b;
+}
+
+Toast.-warning {
+    border-left: outer #d29d44;
+}
+
+Toast.-error {
+    border-left: outer #c55a56;
+}

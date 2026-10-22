@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Captures and analysis output: evidence stays out of the repository.
+*.pcap
+*.pcapng
+*.cap
+*.dmp
+*.db
+*.db-wal
+*.db-shm
+trace-zero-exports/
+samples/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
