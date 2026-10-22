@@ -17,7 +17,7 @@ def test_report_separates_facts_findings_and_interpretation(session):
     assert rep["observed_facts"]["host_count"] == len(session.capture.index.hosts)
     hf = rep["heuristic_findings"]
     assert "not proof" in hf["notice"]
-    assert set(hf["rules"]) == {"TZ-R1", "TZ-R2", "TZ-R3", "TZ-R4", "TZ-R5"}
+    assert set(hf["rules"]) == {f"TZ-R{i}" for i in range(1, 11)}
     exported = next(x for x in hf["findings"] if x["id"] == f.id)
     assert exported["analyst_notes"] == ["analyst thinks this is the backup job"]
     assert exported["supporting_frames"]

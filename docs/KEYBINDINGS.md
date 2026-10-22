@@ -24,6 +24,7 @@ text field is open, so typing `q` or `space` into a filter never quits or starts
 | --- | --- |
 | `h` | host explorer |
 | `n` | network map (topology of the time window) |
+| `c` | flows / connections; enter follows the reassembled stream |
 | `p` | packet explorer |
 | `f` | findings (possible anomalies) |
 | `b` | bookmarks, notes and activity journal |
@@ -62,6 +63,7 @@ text field is open, so typing `q` or `space` into a filter never quits or starts
 | `x` | show / hide raw bytes and full scapy dissection of a packet |
 | `delete` | delete the selected bookmark or note (journal view) |
 | `e` | export JSON summary + HTML report |
+| `X` | export the packets shown (filter + window) to PCAPNG; Wireshark filter copied |
 | `r` | rename investigation |
 | `ctrl+n` | new investigation |
 | `l` | list / switch investigations |

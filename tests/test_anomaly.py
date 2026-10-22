@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from scapy.layers.inet import IP, TCP, UDP
+from scapy.packet import Raw
 from scapy.layers.dns import DNS, DNSQR
 from scapy.layers.l2 import Ether
 
@@ -79,8 +80,14 @@ def test_benign_capture_has_no_findings(tmp_path):
 
 
 def test_thresholds_are_configurable(loaded_sample):
-    strict = AnomalyConfig(repeat_min_attempts=50, fanout_min_ports=100, dns_min_queries=500, spike_min_bytes=10**9, pair_min_contacts=10**6)
-    assert detect(loaded_sample.index, strict) == []
+    strict = AnomalyConfig(
+        repeat_min_attempts=50, fanout_min_ports=100, dns_min_queries=500, spike_min_bytes=10**9, pair_min_contacts=10**6,
+        outbound_min_bytes=10**9, late_min_bytes=10**9, dns_unsolicited_min=100,
+    )
+    remaining = detect(loaded_sample.index, strict)
+    # Rules without volume thresholds still report what they saw: MAC conflicts, conflicting DNS answers, SNI mismatch.
+    assert {f.rule for f in remaining} == {"TZ-R6", "TZ-R7", "TZ-R10"}
+    assert all(f.metrics.get("conflicting", 1) for f in remaining if f.rule == "TZ-R7")
 
 
 def test_unanswered_attempts_get_lower_confidence(tmp_path):
@@ -97,3 +104,40 @@ def test_unanswered_attempts_get_lower_confidence(tmp_path):
 def test_empty_capture(tmp_path):
     idx = CaptureIndex(read_capture(write_pcap(tmp_path / "e.pcap", [])))
     assert detect(idx) == []
+
+
+def test_new_rules_on_sample(loaded_sample):
+    fs = loaded_sample.findings
+    r6 = by_rule(fs, "TZ-R6")[0]
+    assert r6.hosts == ("10.20.0.1",) and set(r6.metrics["macs"]) == {"02:00:00:00:00:01", "02:00:00:00:00:66"}
+    r7 = {f.hosts[0]: f for f in by_rule(fs, "TZ-R7")}
+    assert r7["10.20.0.13"].metrics["conflicting"] == 1 and r7["10.20.0.13"].severity == "HIGH"
+    assert r7["10.20.0.12"].metrics["unmatched"] == 1
+    r8 = by_rule(fs, "TZ-R8")[0]
+    assert r8.hosts == ("10.20.0.13", "203.0.113.99") and r8.metrics["bytes_out"] > 500_000
+    r9 = by_rule(fs, "TZ-R9")[0]
+    assert r9.metrics["destinations"] == ["203.0.113.99"]
+    r10 = by_rule(fs, "TZ-R10")[0]
+    assert r10.metrics["sni"] == "updates.example.com" and r10.metrics["contacted"] == ["198.51.100.66"]
+
+
+def test_one_sided_dns_capture_is_not_flagged(tmp_path):
+    # Only responses, never a query from this client: a capture-point limitation, not an anomaly.
+    from scapy.layers.dns import DNSRR
+
+    frames = [
+        (1000.0 + i, bytes(ETH() / IP(src="10.0.0.53", dst="10.0.0.5") / UDP(sport=53, dport=40000 + i)
+                         / DNS(id=i, qr=1, qd=DNSQR(qname="a.example"), an=[DNSRR(rrname="a.example", rdata="192.0.2.1")])))
+        for i in range(5)
+    ]
+    idx = CaptureIndex(read_capture(write_pcap(tmp_path / "one.pcap", frames)))
+    assert by_rule(detect(idx), "TZ-R7") == []
+
+
+def test_balanced_external_traffic_is_not_outbound(tmp_path):
+    frames = []
+    for i in range(400):
+        frames.append((1000.0 + i * 0.1, bytes(ETH() / IP(src="10.0.0.5", dst="192.0.2.80") / TCP(sport=40000, dport=443, flags="A") / Raw(b"x" * 1400))))
+        frames.append((1000.05 + i * 0.1, bytes(ETH() / IP(src="192.0.2.80", dst="10.0.0.5") / TCP(sport=443, dport=40000, flags="A") / Raw(b"y" * 1400))))
+    idx = CaptureIndex(read_capture(write_pcap(tmp_path / "bal.pcap", frames)))
+    assert by_rule(detect(idx), "TZ-R8") == []

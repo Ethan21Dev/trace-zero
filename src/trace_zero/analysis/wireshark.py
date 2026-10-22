@@ -41,6 +41,11 @@ def _addr(field: str, value: str) -> str:
     return " || ".join([f"ip.{field}=={value}"] + [f"{f}=={value}" for f in _ARP[field]])
 
 
+# Wireshark also matches TCP/UDP fields inside the packet quoted by an ICMP error;
+# TRACE//ZERO classifies such a packet as ICMP, so transport terms exclude ICMP.
+_NOT_ICMP = "!icmp && !icmpv6"
+
+
 def _ports(fields: list[str], value: str) -> str:
     parts = []
     for v in _alts(value):
@@ -49,7 +54,7 @@ def _ports(fields: list[str], value: str) -> str:
             parts += [f"{f} in {{{a}..{b}}}" for f in fields]
         else:
             parts += [f"{f}=={v}" for f in fields]
-    return " || ".join(parts)
+    return f"({' || '.join(parts)}) && {_NOT_ICMP}"
 
 
 def _wrap(expr: str) -> str:
@@ -77,7 +82,8 @@ def _term(token: str, t0: float, notes: list[str]) -> str:
         if key == "dport":
             return _ports(["tcp.dstport", "udp.dstport"], value)
         if key == "proto":
-            return " || ".join(_PROTO[v.lower()] for v in _alts(value))
+            terms = [f"({_PROTO[v]} && {_NOT_ICMP})" if v in ("tcp", "udp") else _PROTO[v] for v in (x.lower() for x in _alts(value))]
+            return " || ".join(terms)
         if key == "flags":
             return " && ".join(f"tcp.flags.{_FLAGS[c]}==1" for c in value.upper())
         if key == "dns":

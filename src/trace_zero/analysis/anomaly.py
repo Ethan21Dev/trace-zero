@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from trace_zero.analysis.index import CaptureIndex, ip_sort_key
+from trace_zero.analysis.index import CaptureIndex, classify_ip, ip_sort_key
 from trace_zero.config import AnomalyConfig
 from trace_zero.models import fmt_bytes, fmt_duration, fmt_ts
 
@@ -52,6 +52,35 @@ RULES: dict[str, Rule] = {
             "TZ-R4",
             "DNS query frequency spike",
             "One source issued far more DNS queries in a time bin than its own baseline for the capture.",
+        ),
+        Rule(
+            "TZ-R6",
+            "One IPv4 address claimed by several MAC addresses",
+            "ARP packets announce the same sender IPv4 address with different sender hardware "
+            "addresses. Consistent with ARP spoofing, but also with failover pairs or replaced NICs.",
+        ),
+        Rule(
+            "TZ-R7",
+            "DNS responses without a matching query",
+            "DNS responses that answer no query observed from that client (same ports and transaction "
+            "ID), or duplicate responses to one query with different answers.",
+        ),
+        Rule(
+            "TZ-R8",
+            "Heavy outbound transfer",
+            "An internal host sent far more bytes to an external host than it received from it.",
+        ),
+        Rule(
+            "TZ-R9",
+            "New external destinations late in the capture",
+            "An internal host started talking to external hosts that were not observed at all during "
+            "the earlier part of the capture.",
+        ),
+        Rule(
+            "TZ-R10",
+            "TLS server name does not match observed DNS answers",
+            "A TLS ClientHello names a server (SNI) that DNS answers in the capture resolved, but the "
+            "connection went to an address none of those answers contained.",
         ),
         Rule(
             "TZ-R5",
@@ -155,6 +184,11 @@ def detect(index: CaptureIndex, cfg: AnomalyConfig | None = None) -> list[Findin
     findings += _volume_spikes(index, cfg)
     findings += _dns_spikes(index, cfg)
     findings += _frequent_pairs(index, cfg)
+    findings += _arp_claims(index, cfg)
+    findings += _dns_unsolicited(index, cfg)
+    findings += _heavy_outbound(index, cfg)
+    findings += _late_new_external(index, cfg)
+    findings += _sni_dns_mismatch(index, cfg)
     findings.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.first_ts, f.rule, f.id))
     return findings
 
@@ -555,6 +589,283 @@ def _frequent_pairs(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
                     "interval_cv": None if cv == float("inf") else round(cv, 3),
                     "pairs_in_baseline": len(contacts),
                 },
+            )
+        )
+    return out
+
+
+# --- shared helpers for R6-R10 -----------------------------------------------------------
+INTERNAL_SCOPES = {"private", "link-local", "loopback"}
+EXTERNAL_SCOPES = {"public", "documentation range"}
+
+
+def _scope(ip: str, cache: dict[str, str]) -> str:
+    s = cache.get(ip)
+    if s is None:
+        s = cache[ip] = classify_ip(ip)
+    return s
+
+
+# --- TZ-R6 -------------------------------------------------------------------------------
+def _arp_claims(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
+    claims: dict[str, list[tuple[float, int, str]]] = defaultdict(list)
+    for i in index.order:
+        p = index.packets[i]
+        if p.net == "ARP" and p.arp_hw and p.src and p.src != "0.0.0.0":
+            claims[p.src].append((p.ts, p.no, p.arp_hw))
+    out = []
+    for ip, events in claims.items():
+        macs = Counter(mac for _t, _n, mac in events)
+        if len(macs) < 2:
+            continue
+        switches = sum(1 for a, b in zip(events, events[1:]) if a[2] != b[2])
+        established, _ = macs.most_common(1)[0]
+        others = [e for e in events if e[2] != established]
+        severity = "HIGH" if switches >= 3 else "MEDIUM"
+        desc = ", ".join(f"{mac} ({n} packets)" for mac, n in macs.most_common())
+        out.append(
+            Finding(
+                id=_fid("TZ-R6", ip, *sorted(macs)),
+                rule="TZ-R6",
+                title=f"{ip} claimed by {len(macs)} MAC addresses",
+                severity=severity,
+                hosts=(ip,),
+                first_ts=others[0][0],
+                last_ts=events[-1][0],
+                frames=_cap([n for _t, n, _m in events], cfg.max_refs),
+                frame_count=len(events),
+                timestamps=[t for t, _n, _m in others][: cfg.max_refs],
+                explanation=(
+                    f"ARP packets announced {ip} from {len(macs)} different sender hardware addresses: {desc}. "
+                    f"The claimed address changed {switches} time(s) during the capture. Hosts that accept "
+                    "these announcements send their traffic for this address to whichever MAC spoke last. "
+                    "This is the mechanism of ARP spoofing; redundancy protocols and hardware changes "
+                    "produce it legitimately."
+                ),
+                confidence="MEDIUM",
+                confidence_reason="ARP sender fields are observed directly, but the capture cannot show whether a failover or a NIC change was planned.",
+                metrics={"macs": dict(macs), "switches": switches, "established_mac": established},
+            )
+        )
+    return out
+
+
+# --- TZ-R7 -------------------------------------------------------------------------------
+def _dns_unsolicited(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
+    seen_queries: set[tuple] = set()
+    querying_clients: set[str] = set()
+    answers: dict[tuple, frozenset] = {}
+    answer_frames: dict[tuple, int] = {}
+    unmatched: dict[str, list] = defaultdict(list)
+    conflicts: dict[str, list] = defaultdict(list)
+    grace_until = index.t0 + cfg.dns_startup_grace_s
+    in_grace = 0
+    for i in index.order:
+        p = index.packets[i]
+        d = p.dns
+        if d is None or p.app != "DNS" or p.src is None or p.dst is None:
+            continue
+        if not d.is_response:
+            seen_queries.add((p.src, p.sport, p.dst, p.dport, d.txid))
+            querying_clients.add(p.src)
+            continue
+        key = (p.dst, p.dport, p.src, p.sport, d.txid)
+        values = frozenset(a.value for a in d.answers)
+        if key not in seen_queries:
+            if p.ts <= grace_until:
+                in_grace += 1  # the query may predate the capture
+            else:
+                unmatched[p.dst].append(p)
+            continue
+        prior = answers.get(key)
+        if prior is None:
+            answers[key] = values
+            answer_frames[key] = p.no
+        elif prior != values:
+            conflicts[p.dst].append((p, answer_frames[key]))
+    out = []
+    for client in sorted(set(unmatched) | set(conflicts), key=ip_sort_key):
+        if client not in querying_clients:
+            continue  # one-sided capture: we never see this client's queries at all
+        um = unmatched.get(client, [])
+        cf = conflicts.get(client, [])
+        if len(um) < cfg.dns_unsolicited_min and not cf:
+            continue
+        frames = sorted({p.no for p in um} | {p.no for p, _ in cf} | {orig for _p, orig in cf})
+        stamps = sorted([p.ts for p in um] + [p.ts for p, _ in cf])
+        names = sorted({p.dns.qname for p in um + [x for x, _ in cf] if p.dns and p.dns.qname})
+        servers = sorted({p.src for p in um + [x for x, _ in cf]}, key=ip_sort_key)
+        severity = "HIGH" if cf else "MEDIUM"
+        parts = []
+        if um:
+            parts.append(f"{len(um)} DNS response(s) reached {client} that match no query it sent (ports and transaction ID)")
+        if cf:
+            parts.append(f"{len(cf)} duplicate response(s) gave different answers than the first response to the same query")
+        out.append(
+            Finding(
+                id=_fid("TZ-R7", client, frames[0]),
+                rule="TZ-R7",
+                title=f"Unsolicited or conflicting DNS responses to {client}",
+                severity=severity,
+                hosts=tuple([client] + servers[:5]),
+                first_ts=stamps[0],
+                last_ts=stamps[-1],
+                frames=_cap(frames, cfg.max_refs),
+                frame_count=len(frames),
+                timestamps=stamps[: cfg.max_refs],
+                explanation=(
+                    "; ".join(parts) + f". Names involved: {', '.join(names[:6]) or '-'}; sent by {', '.join(servers[:4])}. "
+                    "Forged responses are how DNS spoofing works; retransmissions, resolvers behind load balancers "
+                    "and capture loss can also produce mismatches."
+                ),
+                confidence="MEDIUM" if cf or len(um) >= 3 else "LOW",
+                confidence_reason=(
+                    f"The capture shows {client} sending queries, so missing queries are meaningful"
+                    + (f"; {in_grace} unmatched response(s) in the first {cfg.dns_startup_grace_s:g}s were ignored" if in_grace else "")
+                    + "."
+                ),
+                metrics={"unmatched": len(um), "conflicting": len(cf), "names": names[:20]},
+            )
+        )
+    return out
+
+
+# --- TZ-R8 -------------------------------------------------------------------------------
+def _heavy_outbound(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
+    if not index.packets:
+        return []
+    edges = index.view(None, key="").window(index.t0, index.t1).edges
+    scopes: dict[str, str] = {}
+    out = []
+    for (a, b), e in sorted(edges.items()):
+        if _scope(a, scopes) not in INTERNAL_SCOPES or _scope(b, scopes) not in EXTERNAL_SCOPES:
+            continue
+        sent = e[1]
+        back = edges.get((b, a), [0, 0, 0, 0, {}])[1]
+        if sent < cfg.outbound_min_bytes or sent < cfg.outbound_ratio * max(back, 1):
+            continue
+        frames = [index.packets[index.order[pos]].no for pos in index.host_positions.get(a, []) if index.packets[index.order[pos]].dst == b]
+        ratio = sent / max(back, 1)
+        out.append(
+            Finding(
+                id=_fid("TZ-R8", a, b),
+                rule="TZ-R8",
+                title=f"{a} sent {fmt_bytes(sent)} to {b}",
+                severity="MEDIUM" if sent >= 4 * cfg.outbound_min_bytes else "LOW",
+                hosts=(a, b),
+                first_ts=e[2],
+                last_ts=e[3],
+                frames=_cap(frames, cfg.max_refs),
+                frame_count=len(frames),
+                timestamps=[e[2], e[3]],
+                explanation=(
+                    f"Internal host {a} sent {fmt_bytes(sent)} to external host {b} and received {fmt_bytes(back)} "
+                    f"back ({ratio:.0f}x more out than in) between {fmt_ts(e[2])} and {fmt_ts(e[3])} UTC. "
+                    "Uploads, backups to cloud storage and video calls look like this; so does data exfiltration."
+                ),
+                confidence="MEDIUM",
+                confidence_reason="Byte counts are exact for this capture; 'internal' and 'external' are judged from address ranges only.",
+                metrics={"bytes_out": sent, "bytes_in": back, "ratio": round(ratio, 1), "protocols": dict(e[4])},
+            )
+        )
+    return out
+
+
+# --- TZ-R9 -------------------------------------------------------------------------------
+def _late_new_external(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
+    cutoff = index.t0 + max(cfg.late_fraction * index.span, cfg.late_min_baseline_s)
+    if index.t1 <= cutoff:
+        return []
+    scopes: dict[str, str] = {}
+    late = {ip for ip, m in index.hosts.items() if m.first >= cutoff and _scope(ip, scopes) in EXTERNAL_SCOPES}
+    if not late:
+        return []
+    edges = index.view(None, key="").window(index.t0, index.t1).edges
+    per_src: dict[str, list[tuple[str, int, float, int]]] = defaultdict(list)
+    for (a, b), e in edges.items():
+        if b in late and _scope(a, scopes) in INTERNAL_SCOPES:
+            total = e[1] + edges.get((b, a), [0, 0])[1]
+            if total >= cfg.late_min_bytes:
+                first_no = next(
+                    index.packets[index.order[pos]].no for pos in index.host_positions[b] if index.packets[index.order[pos]].src == a
+                )
+                per_src[a].append((b, total, e[2], first_no))
+    out = []
+    baseline = cutoff - index.t0
+    for src, dests in sorted(per_src.items()):
+        dests.sort(key=lambda d: d[2])
+        names = []
+        for ip, total, _t, _no in dests:
+            dns = list(index.hosts[ip].dns_names) + list(index.hosts[ip].tls_names)
+            names.append(f"{ip}" + (f" ({dns[0]})" if dns else "") + f" {fmt_bytes(total)}")
+        out.append(
+            Finding(
+                id=_fid("TZ-R9", src, *[d[0] for d in dests]),
+                rule="TZ-R9",
+                title=f"{src} reached {len(dests)} new external destination(s) late",
+                severity="LOW",
+                hosts=tuple([src] + [d[0] for d in dests][:8]),
+                first_ts=dests[0][2],
+                last_ts=dests[-1][2],
+                frames=_cap([d[3] for d in dests], cfg.max_refs),
+                frame_count=len(dests),
+                timestamps=[d[2] for d in dests],
+                explanation=(
+                    f"After {fmt_duration(baseline)} of capture in which they never appeared, {src} exchanged traffic with: "
+                    f"{'; '.join(names[:8])}. New destinations are normal (updates, browsing); this finding marks "
+                    "where the host's external footprint changed."
+                ),
+                confidence="MEDIUM" if baseline >= 600 else "LOW",
+                confidence_reason=f"'New' is relative to the first {fmt_duration(baseline)} of this capture only.",
+                metrics={"baseline_s": round(baseline, 1), "destinations": [d[0] for d in dests]},
+            )
+        )
+    return out
+
+
+# --- TZ-R10 ------------------------------------------------------------------------------
+def _sni_dns_mismatch(index: CaptureIndex, cfg: AnomalyConfig) -> list[Finding]:
+    resolved: dict[str, set[str]] = defaultdict(set)
+    resolved_frames: dict[str, int] = {}
+    mismatches: dict[tuple[str, str], list] = defaultdict(list)
+    for i in index.order:
+        p = index.packets[i]
+        d = p.dns
+        if d is not None and d.is_response and d.qname:
+            ips = {a.value for a in d.answers if a.rtype in ("A", "AAAA")}
+            if ips:
+                resolved[d.qname.lower()] |= ips
+                resolved_frames.setdefault(d.qname.lower(), p.no)
+        t = p.tls
+        if t is not None and t.sni and p.dst and p.src:
+            name = t.sni.lower()
+            if name in resolved and p.dst not in resolved[name]:
+                mismatches[(p.src, name)].append(p)
+    out = []
+    for (client, name), hellos in sorted(mismatches.items()):
+        dsts = sorted({p.dst for p in hellos}, key=ip_sort_key)
+        frames = sorted({p.no for p in hellos} | {resolved_frames[name]})
+        out.append(
+            Finding(
+                id=_fid("TZ-R10", client, name, *dsts),
+                rule="TZ-R10",
+                title=f"SNI {name} sent to {', '.join(dsts[:2])} (not in DNS answers)",
+                severity="MEDIUM",
+                hosts=tuple([client] + dsts[:6]),
+                first_ts=hellos[0].ts,
+                last_ts=hellos[-1].ts,
+                frames=_cap(frames, cfg.max_refs),
+                frame_count=len(frames),
+                timestamps=[p.ts for p in hellos][: cfg.max_refs],
+                explanation=(
+                    f"{client} opened {len(hellos)} TLS connection(s) naming '{name}' to {', '.join(dsts)}, but every DNS answer "
+                    f"for that name in the capture pointed to {', '.join(sorted(resolved[name], key=ip_sort_key)[:4])}. "
+                    "Hard-coded addresses, DNS-over-HTTPS, CDNs and stale caches cause this; so do domain fronting and "
+                    "traffic deliberately avoiding the local resolver."
+                ),
+                confidence="MEDIUM",
+                confidence_reason="Answers outside this capture (earlier lookups, other resolvers) are invisible here.",
+                metrics={"sni": name, "contacted": dsts, "dns_answers": sorted(resolved[name])[:20]},
             )
         )
     return out

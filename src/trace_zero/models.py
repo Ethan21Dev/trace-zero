@@ -183,6 +183,7 @@ class PacketRecord:
     icmp_type: int | None = None
     icmp_code: int | None = None
     arp_op: int | None = None
+    arp_hw: str | None = None  # ARP sender hardware address (the MAC claiming 'src')
     payload_len: int | None = None
     app: str | None = None  # DNS / MDNS / LLMNR / HTTP / TLS (only when decoded)
     app_info: str | None = None  # decoded, sanitised application detail

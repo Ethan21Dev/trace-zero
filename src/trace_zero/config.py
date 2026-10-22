@@ -56,6 +56,16 @@ class AnomalyConfig:
     pair_z: float = 5.0
     pair_periodic_z: float = 2.0
     pair_periodic_cv: float = 0.25
+    # DNS responses without a matching query (per client).
+    dns_unsolicited_min: int = 1
+    dns_startup_grace_s: float = 1.0
+    # Heavy outbound transfer from an internal to an external host.
+    outbound_min_bytes: int = 500_000
+    outbound_ratio: float = 5.0
+    # New external destination late in the capture.
+    late_fraction: float = 0.5
+    late_min_baseline_s: float = 60.0
+    late_min_bytes: int = 5_000
     # Supporting packet references stored per finding.
     max_refs: int = 500
 

@@ -194,6 +194,7 @@ def _decode_arp(rec: PacketRecord, data: bytes, off: int, errors: list[str]) -> 
     spa = data[base + 6 : base + 10]
     tpa = data[base + 16 : base + 20]
     rec.eth_src = rec.eth_src or _mac(sha)
+    rec.arp_hw = _mac(sha)
     rec.src = _ip(spa)
     rec.dst = _ip(tpa)
 

@@ -19,6 +19,7 @@ TSHARK = shutil.which("tshark")
 needs_tshark = pytest.mark.skipif(TSHARK is None, reason="tshark not installed")
 
 EXACT = [
+    "proto:dhcp", "proto:tcp|udp", "port:161", "proto:icmp sport:53",
     "host:10.20.0.11", "src:10.20.0.0/24 !proto:arp", "dst:192.0.2.44", "port:443", "dport:1-1024", "sport:53",
     "proto:tcp", "proto:udp", "proto:icmp|icmpv6", "proto:arp", "proto:ipv4", "proto:ipv6", "proto:dns", "proto:mdns",
     "proto:http", "proto:tls", "flags:S !flags:A", "flags:SA", "flags:R", "len>1000", "len<=60", "t>200 t<205",
@@ -58,7 +59,8 @@ def test_export_refuses_source_and_changed_file(tmp_path):
 def test_translation_text():
     assert to_wireshark(None) == ("", [])
     expr, notes = to_wireshark(compile_filter("proto:dns !host:10.0.0.1 port:53,5353"))
-    assert expr == "dns && !(ip.addr==10.0.0.1 || arp.src.proto_ipv4==10.0.0.1 || arp.dst.proto_ipv4==10.0.0.1) && (tcp.port==53 || udp.port==53 || tcp.port==5353 || udp.port==5353)"
+    assert expr == ("dns && !(ip.addr==10.0.0.1 || arp.src.proto_ipv4==10.0.0.1 || arp.dst.proto_ipv4==10.0.0.1) && "
+                    "((tcp.port==53 || udp.port==53 || tcp.port==5353 || udp.port==5353) && !icmp && !icmpv6)")
     assert notes == []
     expr, notes = to_wireshark(compile_filter("beacon"))
     assert expr == 'frame contains "beacon"' and notes
