@@ -704,3 +704,23 @@ async def test_verify_key_reports_evidence_state(tmp_path, sample_pcap):
         await pilot.pause()
         events = [e for e in s.store.events(s.investigation.id) if e.kind == "verify"]
         assert "MISMATCH" in events[-1].message
+
+
+async def test_cancel_releases_ui_at_once_and_ignores_late_callbacks(tmp_path, sample_pcap):
+    """Escape must not depend on the worker thread noticing the cancellation in time."""
+    from trace_zero.session import load_capture
+
+    app, s = make_app(tmp_path)
+    async with app.run_test(size=WIDE) as pilot:
+        main = screen(app)
+        main.start_load(str(sample_pcap))
+        worker = main.loading
+        await pilot.press("escape")
+        assert main.loading is None and main.busy == ""
+        # A result delivered late by the cancelled worker is ignored.
+        main._on_loaded(load_capture(sample_pcap, s.config), worker)
+        main._load_failed("late failure", worker)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert s.capture is None and main.loading is None
+        assert main.query_one("#header").status[0] != "error"

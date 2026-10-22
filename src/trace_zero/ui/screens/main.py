@@ -274,29 +274,35 @@ class MainScreen(Screen):
             if now - self._last_progress < 0.08 and stage in ("parsing", "hashing"):
                 return
             self._last_progress = now
-            self.app.call_from_thread(self._on_progress, stage, n, done, total)
+            self.app.call_from_thread(self._on_progress, stage, n, done, total, worker)
 
         try:
             loaded = load_captures(paths, self.session.config, progress, lambda: worker.is_cancelled)
         except ParseCancelled:
-            self.app.call_from_thread(self._load_cancelled)
+            self.app.call_from_thread(self._load_cancelled, worker)
             return
         except CaptureError as exc:
-            self.app.call_from_thread(self._load_failed, str(exc))
+            self.app.call_from_thread(self._load_failed, str(exc), worker)
             return
         except MemoryError:
-            self.app.call_from_thread(self._load_failed, "out of memory - lower [limits] max_packets or split the capture")
+            self.app.call_from_thread(self._load_failed, "out of memory - lower [limits] max_packets or split the capture", worker)
             return
         except Exception as exc:  # noqa: BLE001 - surface, log, keep the app alive
             log.exception("unexpected import failure")
-            self.app.call_from_thread(self._load_failed, f"unexpected error while importing ({type(exc).__name__}: {exc})")
+            self.app.call_from_thread(self._load_failed, f"unexpected error while importing ({type(exc).__name__}: {exc})", worker)
             return
         if worker.is_cancelled:
-            self.app.call_from_thread(self._load_cancelled)
+            self.app.call_from_thread(self._load_cancelled, worker)
             return
-        self.app.call_from_thread(self._on_loaded, loaded)
+        self.app.call_from_thread(self._on_loaded, loaded, worker)
 
-    def _on_progress(self, stage: str, n: int, done: int, total: int) -> None:
+    def _stale(self, worker) -> bool:
+        """A callback from an import that was cancelled or replaced since it started."""
+        return worker is not None and worker is not self.loading
+
+    def _on_progress(self, stage: str, n: int, done: int, total: int, worker=None) -> None:
+        if self._stale(worker):
+            return
         pct = int(done * 100 / total) if total else 100
         label = {"hashing": "HASHING", "parsing": "PARSING", "indexing": "INDEXING", "analysing": "ANALYSING", "flows": "FLOWS", "cache": "FROM CACHE"}.get(stage, stage.upper())
         detail = f"{label} {pct}%" + (f"  {n:,} pkts" if n else "")
@@ -304,14 +310,18 @@ class MainScreen(Screen):
         self.busy = detail
         self._refresh_status()
 
-    def _load_cancelled(self) -> None:
+    def _load_cancelled(self, worker=None) -> None:
+        if self._stale(worker):
+            return
         self.busy = ""
         self.loading = None
         self._restore_header()
         self.app.notify("import cancelled", severity="warning")
         self._refresh_chrome()
 
-    def _load_failed(self, message: str) -> None:
+    def _load_failed(self, message: str, worker=None) -> None:
+        if self._stale(worker):
+            return
         self.busy = ""
         self.loading = None
         self.query_one(HeaderBar).set_state(status=("error", "IMPORT FAILED"))
@@ -328,7 +338,9 @@ class MainScreen(Screen):
         status = ("warn", f"TRUNCATED {len(r.packets):,} pkts") if r.truncated else ("ok", f"ANALYSED {len(r.packets):,} pkts")
         header.set_state(capture=f"{r.file.name}  {fmt_bytes(r.file.size)}", status=status)
 
-    def _on_loaded(self, loaded: LoadedCapture) -> None:
+    def _on_loaded(self, loaded: LoadedCapture, worker=None) -> None:
+        if self._stale(worker):
+            return
         self.busy = ""
         self.loading = None
         try:
@@ -1226,7 +1238,10 @@ class MainScreen(Screen):
 
     def action_escape(self) -> None:
         if self.loading is not None and self.loading.is_running:
+            # The thread may take a moment to notice; the UI is released now and
+            # any late callback from that worker is ignored as stale.
             self.loading.cancel()
+            self._load_cancelled()
             return
         s = self.session
         if s.selection is not None or self.focus_host is not None:
