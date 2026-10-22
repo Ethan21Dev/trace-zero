@@ -19,7 +19,7 @@ class TraceZeroApp(App):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [Binding("ctrl+q", "quit", "quit", priority=True, show=False)]
 
-    def __init__(self, session: Session, capture: str | None = None) -> None:
+    def __init__(self, session: Session, capture: str | list[str] | None = None) -> None:
         super().__init__()
         self.session = session
         self.initial_capture = capture

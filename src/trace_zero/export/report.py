@@ -98,6 +98,10 @@ def build_report(session) -> dict[str, Any]:
         "stop_reason": r.stop_reason,
         "parser_warnings": r.warnings,
         "parse_seconds": round(r.elapsed_s, 3),
+        "sources": [
+            {"filename": i.name, "path": i.path, "sha256": i.sha256, "size_bytes": i.size, "format": i.fmt, "first_frame": o + 1, "packets": c}
+            for i, o, c in r.source_list()
+        ],
         "frames_with_decode_errors": sum(1 for p in r.packets if p.errors),
     }
     full = idx.view(None, key="").window(idx.t0, idx.t1) if r.packets else None
@@ -225,12 +229,13 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def export_targets(directory: Path, name: str, capture_path: str | None) -> tuple[Path, Path]:
+def export_targets(directory: Path, name: str, capture_paths: str | list[str] | None) -> tuple[Path, Path]:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     base = directory / f"{slug(name)}-{stamp}"
     json_path, html_path = base.with_suffix(".json"), base.with_suffix(".html")
-    if capture_path:
-        cap = Path(capture_path).resolve()
-        if cap in (json_path.resolve(), html_path.resolve()):
+    if isinstance(capture_paths, str):
+        capture_paths = [capture_paths]
+    for capture_path in capture_paths or []:
+        if Path(capture_path).resolve() in (json_path.resolve(), html_path.resolve()):
             raise OSError("refusing to overwrite the capture file")
     return json_path, html_path

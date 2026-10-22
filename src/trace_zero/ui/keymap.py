@@ -10,6 +10,7 @@ KEYMAP: list[tuple[str, list[tuple[str, str]]]] = [
             ("q", "back to previous view; quit at the top level"),
             ("ctrl+q", "quit immediately"),
             ("o", "open a PCAP / PCAPNG capture"),
+            ("O", "add another capture to the timeline (multi-sensor)"),
             ("/", "search and filter packets"),
             ("esc", "close dialog / cancel import / clear selection, then filter"),
             ("tab / shift+tab", "move focus between panels"),

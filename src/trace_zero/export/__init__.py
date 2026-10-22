@@ -20,8 +20,8 @@ def write_html(report: dict, path: Path) -> Path:
 
 
 def export_all(session, directory: Path) -> tuple[Path, Path]:
-    capture_path = session.capture.result.file.path if session.capture else None
-    json_path, html_path = export_targets(directory, session.investigation.name, capture_path)
+    capture_paths = [i.path for i, _o, _c in session.capture.result.source_list()] if session.capture else []
+    json_path, html_path = export_targets(directory, session.investigation.name, capture_paths)
     report = build_report(session)
     write_json(report, json_path)
     write_html(report, html_path)

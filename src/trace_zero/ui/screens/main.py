@@ -27,10 +27,10 @@ from trace_zero.analysis.timeline import WindowMode
 from trace_zero.export import export_all
 from trace_zero.export.report import slug
 from trace_zero.models import fmt_bytes, fmt_duration, fmt_rel, fmt_ts
-from trace_zero.parsing.reader import CaptureError, ParseCancelled, read_frame_bytes, validate_capture_path
+from trace_zero.parsing.reader import CaptureError, ParseCancelled, validate_capture_path
 from trace_zero.parsing.scapy_bridge import dissect_frame
 from trace_zero.sanitize import clean
-from trace_zero.session import LoadedCapture, Selection, Session, load_capture
+from trace_zero.session import LoadedCapture, Selection, Session, load_captures
 from trace_zero.storage import StorageError
 from trace_zero.ui import inspect, theme
 from trace_zero.ui.mapgeo import MapEdge, MapNode
@@ -89,6 +89,7 @@ class MainScreen(Screen):
         Binding("question_mark,f1", "help", "help"),
         Binding("q", "back", "back/quit"),
         Binding("o", "open", "open"),
+        Binding("O,shift+o", "add_capture", "add capture"),
         Binding("slash", "filter", "filter"),
         Binding("h", "view('hosts')", "hosts"),
         Binding("n", "view('map')", "map"),
@@ -135,7 +136,7 @@ class MainScreen(Screen):
         Binding("enter", "open_selected", "open", show=False),
     ]
 
-    def __init__(self, session: Session, initial_capture: str | None = None) -> None:
+    def __init__(self, session: Session, initial_capture: str | list[str] | None = None) -> None:
         super().__init__()
         self.session = session
         self.initial_capture = initial_capture
@@ -245,23 +246,25 @@ class MainScreen(Screen):
         self._refresh_tabs()
 
     # ------------------------------------------------------------------ loading
-    def start_load(self, path: str) -> None:
+    def start_load(self, path: str | list[str]) -> None:
+        paths = [path] if isinstance(path, str) else list(path)
         try:
-            validate_capture_path(path, self.session.config.limits)
+            for one in paths:
+                validate_capture_path(one, self.session.config.limits)
         except CaptureError as exc:
             self._load_failed(str(exc))
             return
         if self.loading is not None and self.loading.is_running:
             self.loading.cancel()
         self.timeline_pause()
-        name = Path(path).name
+        name = Path(paths[0]).name + (f" +{len(paths) - 1} more" if len(paths) > 1 else "")
         self.load_status = name
         self.query_one(HeaderBar).set_state(capture=name, status=("busy", "VALIDATING"))
         self.busy = "LOADING"
         self._refresh_chrome()
-        self.loading = self.run_worker(partial(self._load_worker, path), thread=True, exclusive=True, group="load", name="load-capture")
+        self.loading = self.run_worker(partial(self._load_worker, paths), thread=True, exclusive=True, group="load", name="load-capture")
 
-    def _load_worker(self, path: str) -> None:
+    def _load_worker(self, paths: list[str]) -> None:
         worker = get_current_worker()
 
         def progress(stage: str, n: int, done: int, total: int) -> None:
@@ -272,7 +275,7 @@ class MainScreen(Screen):
             self.app.call_from_thread(self._on_progress, stage, n, done, total)
 
         try:
-            loaded = load_capture(path, self.session.config, progress, lambda: worker.is_cancelled)
+            loaded = load_captures(paths, self.session.config, progress, lambda: worker.is_cancelled)
         except ParseCancelled:
             self.app.call_from_thread(self._load_cancelled)
             return
@@ -1111,6 +1114,24 @@ class MainScreen(Screen):
 
         self.app.push_screen(OpenCaptureScreen(start, self.session.config.limits), done)
 
+    def action_add_capture(self) -> None:
+        """Merge another capture (e.g. a second sensor) onto the current timeline."""
+        cap = self.session.capture
+        if cap is None:
+            self.action_open()
+            return
+        current = [info.path for info, _o, _c in cap.result.source_list()]
+
+        def done(path: str | None) -> None:
+            if not path:
+                return
+            if Path(path).resolve() in {Path(p).resolve() for p in current}:
+                self.app.notify("that capture is already on the timeline", severity="warning")
+                return
+            self.start_load(current + [path])
+
+        self.app.push_screen(OpenCaptureScreen(Path(current[-1]).parent, self.session.config.limits), done)
+
     def action_filter(self) -> None:
         s = self.session
         if s.capture is None:
@@ -1369,14 +1390,17 @@ class MainScreen(Screen):
         no = int(sel.ref)
         if self.show_raw and no not in self.raw_cache:
             self.raw_cache[no] = {"loading": True}
-            self._raw_worker(s.capture.result.file, no, s.config.limits.max_raw_bytes)
+            self._raw_worker(no, s.config.limits.max_raw_bytes)
         self._refresh_inspector()
 
     @work(thread=True, group="raw")
-    def _raw_worker(self, info, no: int, max_bytes: int) -> None:
+    def _raw_worker(self, no: int, max_bytes: int) -> None:
         result: dict
         try:
-            data, linktype = read_frame_bytes(info, no)
+            frames = self.session.frame_bytes({no})
+            if no not in frames:
+                raise CaptureError(f"frame {no} is no longer in the capture file")
+            data, linktype = frames[no]
             clipped = len(data) if len(data) > max_bytes else 0
             data = data[:max_bytes]
             layers: list[tuple[str, list[tuple[str, str]]]] = []

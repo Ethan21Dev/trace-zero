@@ -330,3 +330,15 @@ class ParseResult:
     stop_reason: str | None = None
     elapsed_s: float = 0.0
     cached: bool = False  # restored from the on-disk cache instead of parsed
+    # Multi-capture timelines: (file, frame offset, frame count) per source. Empty = single file.
+    sources: list[tuple[FileInfo, int, int]] = field(default_factory=list)
+
+    def source_list(self) -> list[tuple[FileInfo, int, int]]:
+        return self.sources or [(self.file, 0, len(self.packets))]
+
+    def locate(self, no: int) -> tuple[FileInfo, int]:
+        """Map a timeline frame number to (source file, frame number inside that file)."""
+        for info, offset, count in self.source_list():
+            if offset < no <= offset + count:
+                return info, no - offset
+        raise KeyError(no)

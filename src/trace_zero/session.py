@@ -8,6 +8,7 @@ the headless CLI and the test suite drive it directly.
 from __future__ import annotations
 
 import gc
+import hashlib
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,11 +22,11 @@ from trace_zero.analysis.flows import Flow, build_flows
 from trace_zero.analysis.index import CaptureIndex, CaptureView, WindowStats
 from trace_zero.analysis.timeline import Timeline
 from trace_zero.config import Config
-from trace_zero.models import ParseResult
+from trace_zero.models import FileInfo, ParseResult
 from trace_zero.analysis.streams import Stream, reassemble
 from trace_zero.analysis.wireshark import to_wireshark
-from trace_zero.parsing.writer import export_frames
-from trace_zero.parsing.reader import CancelFn, ProgressFn, file_info, read_capture, read_frames, validate_capture_path
+from trace_zero.parsing.writer import export_sources
+from trace_zero.parsing.reader import CancelFn, CaptureError, ProgressFn, file_info, read_capture, read_frames, validate_capture_path
 from trace_zero.storage import Investigation, Store
 
 
@@ -57,6 +58,54 @@ def _gc_paused():
             gc.enable()
 
 
+def _parse_or_restore(path, config: Config, cache: CaptureCache, progress, cancelled) -> ParseResult:
+    resolved, fmt = validate_capture_path(path, config.limits)
+    info = file_info(resolved, fmt, progress, cancelled)
+    with _gc_paused():
+        restored = cache.load_packets(info, config.limits)
+    if restored is not None:
+        if progress:
+            progress("cache", 0, info.size, info.size)
+        packets, linktypes, warnings, truncated, stop_reason = restored
+        return ParseResult(info, packets, linktypes, warnings, truncated, stop_reason, 0.0, cached=True)
+    result = read_capture(resolved, config.limits, progress, cancelled, info=info)
+    cache.store_packets(info, config.limits, result)
+    return result
+
+
+def _analyse(result: ParseResult, config: Config, cache: CaptureCache, progress, started: float) -> LoadedCapture:
+    info = result.file
+    if progress:
+        progress("indexing", len(result.packets), info.size, info.size)
+    index = None
+    if result.cached:
+        snapshot = cache.load_index(info, config.limits)
+        if snapshot is not None:
+            try:
+                with _gc_paused():
+                    index = CaptureIndex(result, snapshot=snapshot)
+            except (KeyError, TypeError, ValueError):
+                index = None  # stale or damaged snapshot: rebuild below
+    if index is None:
+        index = CaptureIndex(result)
+        cache.store_index(info, config.limits, index)
+    analysis = cache.load_analysis(info, config.limits, config.anomaly) if result.cached else None
+    if analysis is not None:
+        findings, flows = analysis
+    else:
+        if progress:
+            progress("analysing", len(result.packets), info.size, info.size)
+        findings = detect(index, config.anomaly)
+        if progress:
+            progress("flows", len(result.packets), info.size, info.size)
+        flows = build_flows(index.packets, index.order)
+        cache.store_analysis(info, config.limits, config.anomaly, findings, flows)
+    # Flow table for the unfiltered view, computed (or restored) off the UI thread.
+    index.view(None, key="").flows_cache = flows
+    result.elapsed_s = time.monotonic() - started
+    return LoadedCapture(result, index, findings)
+
+
 def load_capture(
     path: str | Path,
     config: Config,
@@ -71,48 +120,79 @@ def load_capture(
     are unchanged.
     """
     started = time.monotonic()
-    resolved, fmt = validate_capture_path(path, config.limits)
-    info = file_info(resolved, fmt, progress, cancelled)
     cache = CaptureCache(config.cache_dir, config.limits.cache_max_mb if use_cache else 0)
-    with _gc_paused():
-        restored = cache.load_packets(info, config.limits)
-    if restored is not None:
-        if progress:
-            progress("cache", 0, info.size, info.size)
-        packets, linktypes, warnings, truncated, stop_reason = restored
-        result = ParseResult(info, packets, linktypes, warnings, truncated, stop_reason, 0.0, cached=True)
-    else:
-        result = read_capture(resolved, config.limits, progress, cancelled, info=info)
-        cache.store_packets(info, config.limits, result)
-    if progress:
-        progress("indexing", len(result.packets), result.file.size, result.file.size)
-    index = None
-    if restored is not None:
-        snapshot = cache.load_index(info, config.limits)
-        if snapshot is not None:
-            try:
-                with _gc_paused():
-                    index = CaptureIndex(result, snapshot=snapshot)
-            except (KeyError, TypeError, ValueError):
-                index = None  # stale or damaged snapshot: rebuild below
-    if index is None:
-        index = CaptureIndex(result)
-        cache.store_index(info, config.limits, index)
-    analysis = cache.load_analysis(info, config.limits, config.anomaly) if restored is not None else None
-    if analysis is not None:
-        findings, flows = analysis
-    else:
-        if progress:
-            progress("analysing", len(result.packets), result.file.size, result.file.size)
-        findings = detect(index, config.anomaly)
-        if progress:
-            progress("flows", len(result.packets), result.file.size, result.file.size)
-        flows = build_flows(index.packets, index.order)
-        cache.store_analysis(info, config.limits, config.anomaly, findings, flows)
-    # Flow table for the unfiltered view, computed (or restored) off the UI thread.
-    index.view(None, key="").flows_cache = flows
-    result.elapsed_s = time.monotonic() - started
-    return LoadedCapture(result, index, findings)
+    result = _parse_or_restore(path, config, cache, progress, cancelled)
+    return _analyse(result, config, cache, progress, started)
+
+
+def merge_results(results: list[ParseResult]) -> ParseResult:
+    """Combine several captures into one timeline.
+
+    Frames are renumbered consecutively (capture 1 first); each source keeps its
+    own file identity for raw re-reads and exports. The combined identity is a
+    SHA-256 over the sorted source hashes, so bookmarks reattach whenever the same
+    set of captures is opened again, in any order.
+    """
+    packets: list = []
+    sources = []
+    warnings: list[str] = []
+    linktypes: set[int] = set()
+    for r in results:
+        offset = len(packets)
+        for p in r.packets:
+            p.no += offset
+        packets.extend(r.packets)
+        sources.append((r.file, offset, len(r.packets)))
+        linktypes |= r.linktypes
+        warnings += [f"{r.file.name}: {w}" for w in r.warnings]
+    names = [r.file.name for r in results]
+    combined_sha = hashlib.sha256("".join(sorted(r.file.sha256 for r in results)).encode()).hexdigest()
+    info = FileInfo(
+        path=results[0].file.path,
+        name=f"{names[0]} +{len(names) - 1} more",
+        size=sum(r.file.size for r in results),
+        sha256=combined_sha,
+        mtime_ns=0,
+        fmt="multi",
+    )
+    truncated = [r for r in results if r.truncated]
+    return ParseResult(
+        info,
+        packets,
+        linktypes,
+        warnings,
+        bool(truncated),
+        "; ".join(f"{r.file.name}: {r.stop_reason}" for r in truncated) or None,
+        0.0,
+        cached=all(r.cached for r in results),
+        sources=sources,
+    )
+
+
+def load_captures(
+    paths: list[str | Path],
+    config: Config,
+    progress: ProgressFn | None = None,
+    cancelled: CancelFn | None = None,
+    use_cache: bool = True,
+) -> LoadedCapture:
+    """Load one or more captures onto a single timeline."""
+    if len(paths) == 1:
+        return load_capture(paths[0], config, progress, cancelled, use_cache)
+    started = time.monotonic()
+    cache = CaptureCache(config.cache_dir, config.limits.cache_max_mb if use_cache else 0)
+    seen: set[str] = set()
+    results = []
+    for path in paths:
+        r = _parse_or_restore(path, config, cache, progress, cancelled)
+        if r.file.sha256 in seen:
+            continue  # the same evidence twice adds nothing but duplicate packets
+        seen.add(r.file.sha256)
+        results.append(r)
+    merged = merge_results(results) if len(results) > 1 else results[0]
+    if merged.packets and len(merged.packets) > config.limits.max_packets:
+        raise CaptureError(f"combined captures hold {len(merged.packets):,} packets; the limit is {config.limits.max_packets:,}")
+    return _analyse(merged, config, cache, progress, started)
 
 
 @dataclass(frozen=True)
@@ -154,14 +234,13 @@ class Session:
         self.timeline = Timeline.for_span(idx.t0, idx.t1)
         self.selection = None
         r = loaded.result
-        self.store.record_capture(
-            self.investigation.id, r.file, len(r.packets), idx.t0 if r.packets else None, idx.t1 if r.packets else None, r.truncated
-        )
+        for info, _offset, count in r.source_list():
+            self.store.record_capture(self.investigation.id, info, count, idx.t0 if r.packets else None, idx.t1 if r.packets else None, r.truncated)
+        detail = ", ".join(f"{i.name} (sha256 {i.sha256[:16]}...)" for i, _o, _c in r.source_list())
         self.store.log(
             self.investigation.id,
             "capture",
-            f"imported {r.file.name} ({len(r.packets):,} packets, sha256 {r.file.sha256[:16]}...)"
-            + (f" - TRUNCATED: {r.stop_reason}" if r.truncated else ""),
+            f"imported {detail}: {len(r.packets):,} packets" + (f" - TRUNCATED: {r.stop_reason}" if r.truncated else ""),
         )
         if loaded.findings:
             self.store.log(self.investigation.id, "analysis", f"{len(loaded.findings)} possible anomalies flagged by heuristics")
@@ -217,7 +296,12 @@ class Session:
     def frame_bytes(self, frames: set[int]) -> dict[int, tuple[bytes, int]]:
         """Re-read raw frames from the capture file(s). Safe in a worker thread."""
         assert self.capture is not None
-        return read_frames(self.capture.result.file, frames)
+        out: dict[int, tuple[bytes, int]] = {}
+        for info, offset, count in self.capture.result.source_list():
+            local = {n - offset for n in frames if offset < n <= offset + count}
+            if local:
+                out.update({n + offset: v for n, v in read_frames(info, local).items()})
+        return out
 
     def follow(self, flow: Flow) -> Stream:
         idx = self.capture.index
@@ -242,6 +326,9 @@ class Session:
             if (lo, hi) != (self.capture.index.t0, self.capture.index.t1):
                 window = f"frame.time_epoch >= {lo:.6f} && frame.time_epoch <= {hi:.6f}"
                 expr = f"({expr}) && {window}" if expr else window
+        if self.capture is not None and self.capture.result.sources and "frame.number" in expr:
+            order = " ".join(i.name for i, _o, _c in self.capture.result.sources)
+            notes = notes + [f"frame numbers follow the merged timeline; reproduce it with: mergecap -a -w merged.pcapng {order}"]
         return expr, notes
 
     def export_packets(self, path: Path) -> tuple[int, str, list[str]]:
@@ -251,10 +338,11 @@ class Session:
         expr, notes = self.wireshark_filter()
         r = self.capture.result
         comment = (
-            f"Exported by TRACE//ZERO from {r.file.name} (sha256 {r.file.sha256}); "
+            f"Exported by TRACE//ZERO from {', '.join(f'{i.name} (sha256 {i.sha256})' for i, _o, _c in r.source_list())}; "
             f"investigation '{self.investigation.name}'; selection: {expr or 'all packets'}"
         )
-        count = export_frames(r.file, frames, Path(path), comment)
+        parts = [(info, frames, offset) for info, offset, _count in r.source_list()]
+        count = export_sources(parts, Path(path), comment)
         return count, expr, notes
 
     def evidence_filter(self, finding: Finding) -> PacketFilter:

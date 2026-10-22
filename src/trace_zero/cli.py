@@ -1,7 +1,7 @@
 """Command-line entry point.
 
-    trace-zero [CAPTURE]                       interactive TUI
-    trace-zero CAPTURE --headless [--json F] [--html F]
+    trace-zero [CAPTURE ...]                   interactive TUI
+    trace-zero CAPTURE [CAPTURE ...] --headless [--json F] [--html F]
     trace-zero --generate-sample FILE [--format pcapng]
 """
 
@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="trace-zero",
         description=f"{PRODUCT} - keyboard-driven network forensics for PCAP/PCAPNG captures. {TAGLINE}",
     )
-    p.add_argument("capture", nargs="?", help="capture file to open (.pcap / .pcapng)")
+    p.add_argument("capture", nargs="*", help="capture file(s) to open (.pcap / .pcapng); several are merged onto one timeline")
     p.add_argument("-i", "--investigation", help="investigation name to open or create")
     p.add_argument("--db", type=Path, help="investigation database path (overrides config)")
     p.add_argument("--config", type=Path, help="TOML configuration file")
@@ -58,7 +58,7 @@ def _setup_logging() -> None:
 def _headless(args: argparse.Namespace, cfg: Config) -> int:
     from trace_zero.export import build_report, write_html, write_json
     from trace_zero.parsing import CaptureError
-    from trace_zero.session import Session, load_capture
+    from trace_zero.session import Session, load_captures
     from trace_zero.storage import StorageError, Store
 
     if not args.capture:
@@ -67,7 +67,7 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     try:
         store = Store(cfg.db_path)
         inv = store.open_or_create(args.investigation)
-        loaded = load_capture(args.capture, cfg, use_cache=not args.no_cache)
+        loaded = load_captures(args.capture, cfg, use_cache=not args.no_cache)
     except (CaptureError, StorageError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -88,7 +88,10 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     print(f"{PRODUCT}  {TAGLINE}")
     print(f"investigation  {inv.name}")
     print(f"capture        {r.file.name}  ({r.file.fmt}, {r.file.size:,} bytes)")
-    print(f"sha256         {r.file.sha256}")
+    print(f"sha256         {r.file.sha256}" + ("  (combined)" if r.sources else ""))
+    if r.sources:
+        for info, offset, count in r.sources:
+            print(f"  source       {info.name}  frames {offset + 1:,}-{offset + count:,}  sha256 {info.sha256}")
     print(f"packets        {len(r.packets):,}   hosts {len(idx.hosts):,}   load {r.elapsed_s:.2f}s" + ("  (from cache)" if r.cached else ""))
     if r.truncated:
         print(f"TRUNCATED      {r.stop_reason}")
@@ -149,9 +152,10 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging()
     if args.headless:
         return _headless(args, cfg)
-    if args.capture and not Path(args.capture).expanduser().exists():
-        print(f"error: capture not found: {args.capture}", file=sys.stderr)
-        return 1
+    for capture in args.capture:
+        if not Path(capture).expanduser().exists():
+            print(f"error: capture not found: {capture}", file=sys.stderr)
+            return 1
 
     from trace_zero.session import Session
     from trace_zero.storage import StorageError, Store
@@ -163,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     except StorageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    app = TraceZeroApp(Session(cfg, store, inv), args.capture)
+    app = TraceZeroApp(Session(cfg, store, inv), args.capture or None)
     try:
         app.run()
     finally:

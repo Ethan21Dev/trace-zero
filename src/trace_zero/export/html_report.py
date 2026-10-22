@@ -116,6 +116,15 @@ def render_html(report: dict[str, Any]) -> str:
                 ]
             )
         )
+        if len(cap.get("sources", [])) > 1:
+            out.append('<p class="notice">Several captures merged onto one timeline. Frames are numbered consecutively; the combined SHA-256 covers the sorted source hashes. Packets seen by more than one sensor appear once per capture.</p>')
+            out.append(
+                _table(
+                    ["file", "sha256", "format", "frames", "packets"],
+                    [[c["filename"], c["sha256"], c["format"], f'{c["first_frame"]}-{c["first_frame"] + c["packets"] - 1}', c["packets"]] for c in cap["sources"]],
+                    {4},
+                )
+            )
         if cap["parser_warnings"]:
             out.append('<p class="warn">Parser warnings:</p><ul>' + "".join(f"<li>{e(w)}</li>" for w in cap["parser_warnings"]) + "</ul>")
     if facts:
