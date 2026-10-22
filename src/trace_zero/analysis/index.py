@@ -212,6 +212,10 @@ class HostMeta:
     dports_initiated: Counter = field(default_factory=Counter)  # (proto, port) this host opened
     ports_accepting: Counter = field(default_factory=Counter)  # TCP ports where SYN-ACK was sent
     dns_queries: int = 0
+    dhcp_names: dict[str, int] = field(default_factory=dict)  # DHCP host-name -> frame
+    tls_names: dict[str, int] = field(default_factory=dict)  # SNI / certificate names served here -> frame
+    tls_client_fps: Counter = field(default_factory=Counter)  # JA4 fingerprints sent by this host
+    tls_server_fps: Counter = field(default_factory=Counter)  # JA3S fingerprints sent by this host
 
     @property
     def scope(self) -> str:
@@ -270,6 +274,8 @@ class CaptureIndex:
         events = self.events
         pk = self.packets
         udp_flows: set[tuple] = set()
+        dhcp_names: dict[str, tuple[str, int]] = {}  # client MAC -> (host-name, frame)
+        dhcp_addrs: dict[str, str] = {}  # client MAC -> address confirmed by ACK or already in use
         for pos, idx in enumerate(self.order):
             p = pk[idx]
             self.proto_counts[p.proto] += 1
@@ -315,6 +321,26 @@ class CaptureIndex:
                 if (dst, p.dport, src, p.sport) not in udp_flows and flow not in udp_flows:
                     udp_flows.add(flow)
                     m_src.dports_initiated[("UDP", p.dport)] += 1
+            if p.dhcp is not None:
+                d = p.dhcp
+                if d.client_mac:
+                    if d.hostname:
+                        dhcp_names.setdefault(d.client_mac, (d.hostname, p.no))
+                    if d.msg_type == 5 and d.yiaddr and d.yiaddr != "0.0.0.0":
+                        dhcp_addrs[d.client_mac] = d.yiaddr
+                    elif d.ciaddr and d.ciaddr != "0.0.0.0":
+                        dhcp_addrs.setdefault(d.client_mac, d.ciaddr)
+            if p.tls is not None:
+                t = p.tls
+                if t.sni and dst in hosts and len(hosts[dst].tls_names) < 64:
+                    hosts[dst].tls_names.setdefault(t.sni, p.no)
+                for name in ((t.cert_subject_cn,) if t.cert_subject_cn else ()) + t.cert_san:
+                    if len(m_src.tls_names) < 64:
+                        m_src.tls_names.setdefault(name, p.no)
+                if t.ja4:
+                    m_src.tls_client_fps[t.ja4] += 1
+                if t.ja3s:
+                    m_src.tls_server_fps[t.ja3s] += 1
             if p.dns is not None:
                 d = p.dns
                 if not d.is_response:
@@ -334,6 +360,10 @@ class CaptureIndex:
                 for name, no in names.items():
                     m.dns_names.setdefault(name, no)
         self._pending_names.clear()
+        for mac, (hostname, no) in dhcp_names.items():
+            addr = dhcp_addrs.get(mac)
+            if addr is not None and addr in hosts:
+                hosts[addr].dhcp_names.setdefault(hostname, no)
         # At equal timestamps a host's first observation precedes the link it appears on.
         events.sort(key=lambda e: (e.ts, 0 if e.kind == "host" else 1, e.ref))
 
@@ -380,6 +410,7 @@ class CaptureView:
             self.blocks.append((hosts, edges, size))
         self._cache: OrderedDict[tuple[int, int], WindowStats] = OrderedDict()
         self._hist_cache: dict[tuple, list[int]] = {}
+        self.flows_cache: list | None = None  # filled lazily by Session.flows()
 
     def __len__(self) -> int:
         return len(self.rows)

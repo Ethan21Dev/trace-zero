@@ -437,3 +437,38 @@ async def test_markup_in_investigation_name_is_inert(tmp_path, sample_pcap):
         await pilot.pause()
         assert app.is_running
         assert "Case [/x] [bold]" in screen(app).query_one("#header").render().plain
+
+
+async def test_flows_view_follow_stream_and_packets(tmp_path, sample_pcap):
+    from trace_zero.ui.screens.stream import FollowStreamScreen
+
+    app, s = make_app(tmp_path, sample_pcap)
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        main = screen(app)
+        await pilot.press("c")
+        assert main.center_view == "flows" and main.focused.id == "view-flows"
+        table = main.query_one("#view-flows", VirtualTable)
+        assert table.count == len(s.flows())
+        # Pick an HTTP flow so the reassembled stream has decodable content.
+        target = next(i for i, f in enumerate(main.flow_rows) if f.app == "HTTP" and f.state == "closed")
+        table.move_to(target)
+        await pilot.pause()
+        assert s.selection.kind == "flow"
+        flow = s.flow(s.selection.ref)
+        await pilot.press("enter")
+        assert isinstance(app.screen, FollowStreamScreen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        stream = app.screen.stream
+        assert stream is not None and stream.data("a").startswith(b"GET /status/index.html")
+        assert any("HTTP/1.1 200 OK" in t for t, _ in stream.decoded)
+        await pilot.press("x")  # hex view renders
+        await pilot.press("p")
+        await pilot.pause()
+        assert main.center_view == "packets" and s.filter.frame_set == frozenset(flow.frames)
+        await pilot.press("m")  # bookmark a packet of the flow, then the flow itself from flows view
+        await pilot.press("escape")
+        await pilot.press("c")
+        await pilot.press("s")
+        assert main.flow_sort == ("bytes", False)

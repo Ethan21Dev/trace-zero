@@ -178,6 +178,21 @@ def atomic_write(path: Path, data: str) -> None:
         raise
 
 
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tz-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def export_targets(directory: Path, name: str, capture_path: str | None) -> tuple[Path, Path]:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     base = directory / f"{slug(name)}-{stamp}"

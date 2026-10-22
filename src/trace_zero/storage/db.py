@@ -15,7 +15,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+BOOKMARK_KINDS = ('packet', 'host', 'finding', 'conversation', 'flow')
+NOTE_KINDS = ('investigation',) + BOOKMARK_KINDS
+FINDING_STATUSES = ('open', 'benign', 'escalated')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -45,7 +49,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     id INTEGER PRIMARY KEY,
     investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
     capture_sha256 TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('packet', 'host', 'finding', 'conversation')),
+    kind TEXT NOT NULL CHECK (kind IN ('packet', 'host', 'finding', 'conversation', 'flow')),
     ref TEXT NOT NULL,
     label TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
@@ -55,7 +59,7 @@ CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY,
     investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
     capture_sha256 TEXT NOT NULL DEFAULT '',
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('investigation', 'packet', 'host', 'finding', 'conversation')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('investigation', 'packet', 'host', 'finding', 'conversation', 'flow')),
     target_ref TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL,
     created_at REAL NOT NULL,
@@ -68,6 +72,44 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     message TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS marks (
+    id INTEGER PRIMARY KEY,
+    investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+    capture_sha256 TEXT NOT NULL,
+    ts REAL NOT NULL,
+    label TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS finding_status (
+    investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+    capture_sha256 TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'benign', 'escalated')),
+    reason TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (investigation_id, capture_sha256, finding_id)
+);
+CREATE TABLE IF NOT EXISTS suppressions (
+    id INTEGER PRIMARY KEY,
+    investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+    rule TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (investigation_id, rule, host)
+);
+CREATE TABLE IF NOT EXISTS saved_filters (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    expression TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS filter_history (
+    id INTEGER PRIMARY KEY,
+    expression TEXT NOT NULL UNIQUE,
+    used_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_marks_inv ON marks(investigation_id, capture_sha256, ts);
 CREATE INDEX IF NOT EXISTS ix_bookmarks_inv ON bookmarks(investigation_id, capture_sha256);
 CREATE INDEX IF NOT EXISTS ix_notes_inv ON notes(investigation_id, capture_sha256);
 CREATE INDEX IF NOT EXISTS ix_events_inv ON events(investigation_id, at);
@@ -110,6 +152,26 @@ class Note:
 
 
 @dataclass(frozen=True)
+class Mark:
+    id: int
+    ts: float
+    label: str
+    created_at: float
+
+
+@dataclass(frozen=True)
+class Suppression:
+    id: int
+    rule: str
+    host: str
+    reason: str
+    created_at: float
+
+    def matches(self, rule: str, hosts: tuple[str, ...]) -> bool:
+        return self.rule == rule and (not self.host or self.host in hosts)
+
+
+@dataclass(frozen=True)
 class Event:
     id: int
     at: float
@@ -147,9 +209,36 @@ class Store:
                 self.conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             elif int(row["value"]) > SCHEMA_VERSION:
                 raise StorageError("database was created by a newer TRACE//ZERO version")
+            elif int(row["value"]) < 2:
+                self._migrate_to_v2()
             self.conn.commit()
         except sqlite3.DatabaseError as exc:
             raise StorageError(f"investigation database is unusable ({exc}); move it aside to start fresh") from exc
+
+    def _migrate_to_v2(self) -> None:
+        """v1 -> v2: widen the kind CHECK constraints (adds 'flow'). Data is copied unchanged."""
+        block = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS bookmarks") : SCHEMA.index("CREATE TABLE IF NOT EXISTS events")]
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.executescript(
+                "BEGIN;"
+                "ALTER TABLE bookmarks RENAME TO bookmarks_v1;"
+                "ALTER TABLE notes RENAME TO notes_v1;"
+                + block
+                + "INSERT INTO bookmarks SELECT * FROM bookmarks_v1;"
+                "INSERT INTO notes SELECT * FROM notes_v1;"
+                "DROP TABLE bookmarks_v1; DROP TABLE notes_v1;"
+                "CREATE INDEX IF NOT EXISTS ix_bookmarks_inv ON bookmarks(investigation_id, capture_sha256);"
+                "CREATE INDEX IF NOT EXISTS ix_notes_inv ON notes(investigation_id, capture_sha256);"
+                "UPDATE meta SET value='2' WHERE key='schema_version';"
+                "COMMIT;"
+            )
+        except sqlite3.Error:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
     def close(self) -> None:
         self.conn.close()
@@ -318,3 +407,109 @@ class Store:
             "SELECT * FROM events WHERE investigation_id=? ORDER BY at DESC, id DESC LIMIT ?", (inv_id, limit)
         ).fetchall()
         return [Event(r["id"], r["at"], r["kind"], r["message"]) for r in reversed(rows)]
+
+    # -- timeline marks ------------------------------------------------------------
+    def add_mark(self, inv_id: int, sha: str, ts: float, label: str) -> int:
+        label = " ".join(label.split())[:120]
+        if not label:
+            raise StorageError("mark label is empty")
+        cur = self._exec(
+            "INSERT INTO marks (investigation_id, capture_sha256, ts, label, created_at) VALUES (?,?,?,?,?)",
+            (inv_id, sha, ts, label, time.time()),
+        )
+        self.log(inv_id, "mark", f"timeline mark '{label}' at {ts:.6f}")
+        self.touch(inv_id)
+        return int(cur.lastrowid)
+
+    def marks(self, inv_id: int, sha: str) -> list[Mark]:
+        rows = self.conn.execute(
+            "SELECT * FROM marks WHERE investigation_id=? AND capture_sha256=? ORDER BY ts, id", (inv_id, sha)
+        ).fetchall()
+        return [Mark(r["id"], r["ts"], r["label"], r["created_at"]) for r in rows]
+
+    def delete_mark(self, inv_id: int, mark_id: int) -> None:
+        self._exec("DELETE FROM marks WHERE id=? AND investigation_id=?", (mark_id, inv_id))
+        self.log(inv_id, "mark", f"timeline mark {mark_id} deleted")
+
+    # -- finding triage --------------------------------------------------------------
+    def set_finding_status(self, inv_id: int, sha: str, finding_id: str, status: str, reason: str = "") -> None:
+        if status not in FINDING_STATUSES:
+            raise StorageError(f"unknown status {status!r}")
+        self._exec(
+            """INSERT INTO finding_status (investigation_id, capture_sha256, finding_id, status, reason, updated_at)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT (investigation_id, capture_sha256, finding_id)
+               DO UPDATE SET status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at""",
+            (inv_id, sha, finding_id, status, reason.strip()[:500], time.time()),
+        )
+        self.log(inv_id, "triage", f"finding {finding_id} marked {status}" + (f": {reason.strip()[:200]}" if reason.strip() else ""))
+        self.touch(inv_id)
+
+    def finding_statuses(self, inv_id: int, sha: str) -> dict[str, tuple[str, str]]:
+        rows = self.conn.execute(
+            "SELECT finding_id, status, reason FROM finding_status WHERE investigation_id=? AND capture_sha256=?", (inv_id, sha)
+        ).fetchall()
+        return {r["finding_id"]: (r["status"], r["reason"]) for r in rows}
+
+    # -- suppression rules ---------------------------------------------------------------
+    def add_suppression(self, inv_id: int, rule: str, host: str, reason: str) -> int:
+        reason = reason.strip()
+        if not reason:
+            raise StorageError("a suppression needs a reason")
+        cur = self._exec(
+            """INSERT INTO suppressions (investigation_id, rule, host, reason, created_at) VALUES (?,?,?,?,?)
+               ON CONFLICT (investigation_id, rule, host) DO UPDATE SET reason=excluded.reason""",
+            (inv_id, rule, host, reason[:500], time.time()),
+        )
+        self.log(inv_id, "triage", f"suppression added: {rule} {host or '(any host)'}: {reason[:200]}")
+        self.touch(inv_id)
+        return int(cur.lastrowid)
+
+    def suppressions(self, inv_id: int) -> list[Suppression]:
+        rows = self.conn.execute("SELECT * FROM suppressions WHERE investigation_id=? ORDER BY id", (inv_id,)).fetchall()
+        return [Suppression(r["id"], r["rule"], r["host"], r["reason"], r["created_at"]) for r in rows]
+
+    def delete_suppression(self, inv_id: int, sup_id: int) -> None:
+        self._exec("DELETE FROM suppressions WHERE id=? AND investigation_id=?", (sup_id, inv_id))
+        self.log(inv_id, "triage", f"suppression {sup_id} removed")
+
+    # -- filters (global, not tied to an investigation) -----------------------------------------
+    def record_filter(self, expression: str, keep: int = 50) -> None:
+        expression = expression.strip()
+        if not expression:
+            return
+        self._exec(
+            "INSERT INTO filter_history (expression, used_at) VALUES (?,?) ON CONFLICT (expression) DO UPDATE SET used_at=excluded.used_at",
+            (expression[:1000], time.time()),
+        )
+        self._exec("DELETE FROM filter_history WHERE id NOT IN (SELECT id FROM filter_history ORDER BY used_at DESC LIMIT ?)", (keep,))
+
+    def filter_history(self, limit: int = 50) -> list[str]:
+        rows = self.conn.execute("SELECT expression FROM filter_history ORDER BY used_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
+        return [r["expression"] for r in rows]
+
+    def save_filter(self, name: str, expression: str) -> None:
+        name = _clean_name(name)
+        if not expression.strip():
+            raise StorageError("cannot save an empty filter")
+        self._exec(
+            "INSERT INTO saved_filters (name, expression, created_at) VALUES (?,?,?) ON CONFLICT (name) DO UPDATE SET expression=excluded.expression",
+            (name, expression.strip()[:1000], time.time()),
+        )
+
+    def saved_filters(self) -> list[tuple[str, str]]:
+        rows = self.conn.execute("SELECT name, expression FROM saved_filters ORDER BY name").fetchall()
+        return [(r["name"], r["expression"]) for r in rows]
+
+    def delete_saved_filter(self, name: str) -> None:
+        self._exec("DELETE FROM saved_filters WHERE name=?", (name,))
+
+    # -- chain of custody --------------------------------------------------------------------------
+    def prior_hashes(self, path: str) -> list[tuple[str, float, str]]:
+        """Every (sha256, imported_at, investigation name) previously recorded for this path."""
+        rows = self.conn.execute(
+            """SELECT c.sha256, c.imported_at, i.name FROM captures c JOIN investigations i ON i.id = c.investigation_id
+               WHERE c.path=? ORDER BY c.imported_at""",
+            (path,),
+        ).fetchall()
+        return [(r["sha256"], r["imported_at"], r["name"]) for r in rows]

@@ -19,7 +19,8 @@ from textual.worker import Worker, get_current_worker
 
 from trace_zero import PRODUCT, TAGLINE
 from trace_zero.analysis.anomaly import SEVERITY_ORDER
-from trace_zero.analysis.filters import FilterError, PacketFilter
+from trace_zero.analysis.filters import FilterError, PacketFilter, frames_filter
+from trace_zero.analysis.flows import build_flows, flows_in_window
 from trace_zero.analysis.index import H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS_OUT, CaptureView, WindowStats, ip_sort_key
 from trace_zero.analysis.timeline import WindowMode
 from trace_zero.export import export_all
@@ -40,6 +41,7 @@ from trace_zero.ui.screens.dialogs import (
     OpenCaptureScreen,
     PromptScreen,
 )
+from trace_zero.ui.screens.stream import FollowStreamScreen
 from trace_zero.ui.widgets.chrome import HeaderBar, StatusBar
 from trace_zero.ui.widgets.netmap import MapCanvas
 from trace_zero.ui.widgets.table import Col, VirtualTable
@@ -56,8 +58,11 @@ PEER_COLS = [Col("", 2), Col("PEER / LINK"), Col("PKTS →/←", 13, "right"), C
 PACKET_COLS = [Col("NO", 7, "right"), Col("TIME UTC", 12), Col("SOURCE", 15), Col("DESTINATION", 15), Col("PROTO", 6), Col("LEN", 5, "right"), Col("INFO", min_width=12)]
 FINDING_COLS = [Col("SEV", 6), Col("RULE", 4), Col("FIRST UTC", 12), Col("CONF", 4), Col("FINDING", min_width=16), Col("HOSTS", 20)]
 JOURNAL_COLS = [Col("WHEN (UTC)", 19), Col("TYPE", 8), Col("TARGET", 24), Col("DETAIL", min_width=10)]
+FLOW_COLS = [Col("STATE", 10), Col("PROTO", 6), Col("CLIENT / FIRST SENDER", min_width=14), Col("SERVER", min_width=14), Col("PKTS →/←", 11, "right"), Col("BYTES", 9, "right"), Col("DUR", 9, "right"), Col("APP", 5)]
 
-VIEW_TITLES = {"map": "NETWORK MAP", "packets": "PACKETS", "findings": "FINDINGS", "journal": "JOURNAL", "empty": TAGLINE}
+VIEW_TITLES = {"map": "NETWORK MAP", "flows": "FLOWS", "packets": "PACKETS", "findings": "FINDINGS", "journal": "JOURNAL", "empty": TAGLINE}
+FLOW_SORTS = ["time", "bytes", "packets", "state"]
+VIEW_FOCUS = {"map": "#peers-table", "flows": "#view-flows", "packets": "#view-packets", "findings": "#view-findings", "journal": "#view-journal"}
 PACKET_SORTS = ["time", "no", "src", "dst", "proto", "len"]
 HOST_SORTS = ["bytes", "pkts", "address"]
 FINDING_SORTS = ["severity", "time", "rule"]
@@ -83,6 +88,7 @@ class MainScreen(Screen):
         Binding("slash", "filter", "filter"),
         Binding("h", "view('hosts')", "hosts"),
         Binding("n", "view('map')", "map"),
+        Binding("c", "view('flows')", "flows"),
         Binding("p", "view('packets')", "packets"),
         Binding("f", "view('findings')", "findings"),
         Binding("b", "view('journal')", "journal"),
@@ -132,6 +138,8 @@ class MainScreen(Screen):
         self.packet_sort = ("time", False)
         self.host_sort = ("bytes", False)
         self.finding_sort = ("severity", False)
+        self.flow_sort = ("time", False)
+        self.flow_rows: list = []
         self.finding_rows: list = []
         self.journal_rows: list[tuple] = []
         self.peer_rows: list[dict] = []
@@ -157,6 +165,7 @@ class MainScreen(Screen):
                     with Vertical(id="view-map"):
                         yield MapCanvas(id="map-canvas")
                         yield VirtualTable(PEER_COLS, id="peers-table", empty_text="no links in window")
+                    yield VirtualTable(FLOW_COLS, id="view-flows", empty_text="no flows in window")
                     yield VirtualTable(PACKET_COLS, id="view-packets", empty_text="no packets in window")
                     yield VirtualTable(FINDING_COLS, id="view-findings", empty_text="no heuristic fired for this capture")
                     yield VirtualTable(JOURNAL_COLS, id="view-journal", empty_text="no bookmarks, notes or activity yet")
@@ -263,7 +272,7 @@ class MainScreen(Screen):
 
     def _on_progress(self, stage: str, n: int, done: int, total: int) -> None:
         pct = int(done * 100 / total) if total else 100
-        label = {"hashing": "HASHING", "parsing": "PARSING", "indexing": "INDEXING", "analysing": "ANALYSING"}.get(stage, stage.upper())
+        label = {"hashing": "HASHING", "parsing": "PARSING", "indexing": "INDEXING", "analysing": "ANALYSING", "flows": "FLOWS"}.get(stage, stage.upper())
         detail = f"{label} {pct}%" + (f"  {n:,} pkts" if n else "")
         self.query_one(HeaderBar).set_state(status=("busy", detail + "  (esc cancels)"))
         self.busy = detail
@@ -337,22 +346,30 @@ class MainScreen(Screen):
         self.stats = s.window_stats()
         self._refresh_hosts()
         self._refresh_map()
-        if self.center_view == "packets":
-            self._refresh_packets()
-        elif self.center_view == "findings":
-            self._refresh_findings()
-        elif self.center_view == "journal":
-            self._refresh_journal()
+        self._refresh_center()
         self._refresh_inspector()
         self._refresh_timeline()
         self._refresh_chrome()
+
+    def _refresh_center(self) -> None:
+        view = self.center_view
+        if view == "packets":
+            self._refresh_packets()
+        elif view == "flows":
+            self._refresh_flows()
+        elif view == "findings":
+            self._refresh_findings()
+        elif view == "journal":
+            self._refresh_journal()
+        elif view == "map":
+            self._refresh_map()
 
     def _refresh_chrome(self) -> None:
         self.query_one(HeaderBar).set_state(investigation=self.session.investigation.name)
         self._refresh_status()
 
     def _refresh_tabs(self) -> None:
-        tabs = [("map", "n", "MAP"), ("packets", "p", "PACKETS"), ("findings", "f", "FINDINGS"), ("journal", "b", "JOURNAL")]
+        tabs = [("map", "n", "MAP"), ("flows", "c", "FLOWS"), ("packets", "p", "PACKETS"), ("findings", "f", "FINDINGS"), ("journal", "b", "JOURNAL")]
         if self.compact:
             tabs = [("hosts", "h", "HOSTS")] + tabs + [("inspector", "i", "INSPECT")]
         active = self.center_view if (not self.compact or self.compact_panel == "center") else self.compact_panel
@@ -389,12 +406,14 @@ class MainScreen(Screen):
             keys += [("enter", "evidence"), ("m", "mark"), ("a", "note"), ("s", f"sort:{self.finding_sort[0]}")]
         elif fid == "view-journal":
             keys += [("enter", "go to"), ("del", "delete")]
+        elif fid == "view-flows":
+            keys += [("enter", "follow stream"), ("m", "mark"), ("a", "note"), ("s", f"sort:{self.flow_sort[0]}")]
         elif fid == "peers-table":
             keys += [("enter", "inspect link"), ("m", "mark"), ("a", "note")]
         elif fid == "timeline":
             keys += [("w", "mode"), ("[ ]", "width"), ("+ -", "speed"), ("home/end", "jump")]
         else:
-            keys += [("h n p f b", "views"), ("w", "mode"), ("+ -", "speed")]
+            keys += [("h n c p f b", "views"), ("w", "mode"), ("+ -", "speed")]
         keys += [("e", "export"), ("q", "back" if self.history else "quit")]
         lo, hi = tl.window()
         rng = f"{fmt_ts(lo)} → {fmt_ts(hi)} ({fmt_duration(hi - lo)})"
@@ -692,6 +711,10 @@ class MainScreen(Screen):
                 f = s.capture.finding(sel.ref)
                 content = inspect.finding(s, f) if f else Text("finding not found")
                 title = "INSPECTOR · FINDING"
+            elif sel.kind == "flow":
+                flow = s.flow(sel.ref)
+                content = inspect.flow(s, flow) if flow else Text("flow is not in the current filtered view")
+                title = "INSPECTOR · FLOW"
             else:
                 content, title = inspect.conversation(s, sel.ref, self.stats), "INSPECTOR · CONVERSATION"
         except Exception as exc:  # noqa: BLE001 - inspector must not take the UI down
@@ -737,14 +760,7 @@ class MainScreen(Screen):
             self._apply_layout()
         self._refresh_tabs()
         if self.session.capture is not None:
-            if view == "packets":
-                self._refresh_packets()
-            elif view == "findings":
-                self._refresh_findings()
-            elif view == "journal":
-                self._refresh_journal()
-            elif view == "map":
-                self._refresh_map()
+            self._refresh_center()
 
     def _push_history(self) -> None:
         state = (self.center_view, self.compact_panel)
@@ -753,14 +769,13 @@ class MainScreen(Screen):
             del self.history[:-20]
 
     def action_view(self, name: str) -> None:
-        if name in ("map", "packets", "findings", "journal"):
+        if name in VIEW_FOCUS:
             if self.session.capture is None and name != "journal":
                 self.app.notify("open a capture first (o)", severity="warning")
                 return
             if self.center_view != name or (self.compact and self.compact_panel != "center"):
                 self._switch_center(name)
-            target = {"map": "#peers-table", "packets": "#view-packets", "findings": "#view-findings", "journal": "#view-journal"}[name]
-            self.query_one(target).focus()
+            self.query_one(VIEW_FOCUS[name]).focus()
         elif name == "hosts":
             if self.compact and self.compact_panel != "hosts":
                 self._push_history()
@@ -788,7 +803,7 @@ class MainScreen(Screen):
             self._apply_layout()
             focus = {"hosts": "#hosts-table", "inspector": "#inspector-panel"}.get(panel) if self.compact else None
             if focus is None:
-                focus = {"map": "#peers-table", "packets": "#view-packets", "findings": "#view-findings", "journal": "#view-journal"}.get(view)
+                focus = VIEW_FOCUS.get(view)
             if focus:
                 self.query_one(focus).focus()
             self._refresh_status()
@@ -840,6 +855,34 @@ class MainScreen(Screen):
         self.session.selection = Selection("packet", str(event.key))
         self._refresh_inspector()
         self.action_view("inspector")
+
+    @on(VirtualTable.Highlighted, "#view-flows")
+    def flow_highlighted(self, event: VirtualTable.Highlighted) -> None:
+        if event.key is not None:
+            self.session.selection = Selection("flow", event.key)
+            self._refresh_inspector()
+
+    @on(VirtualTable.Activated, "#view-flows")
+    def flow_activated(self, event: VirtualTable.Activated) -> None:
+        self.session.selection = Selection("flow", event.key)
+        self.follow_stream(event.key)
+
+    def follow_stream(self, ref: str) -> None:
+        flow = self.session.flow(ref)
+        if flow is None:
+            return
+        self.timeline_pause()
+
+        def done(result: str | None) -> None:
+            if result == "packets":
+                self._set_filter(frames_filter(set(flow.frames), "flow"), f"flow {flow.endpoint('a')} \u21c4 {flow.endpoint('b')}")
+                self.session.timeline.set_cursor(max(self.session.timeline.cursor, flow.last))
+                self.session.timeline.mode = WindowMode.CUMULATIVE
+                self._switch_center("packets")
+                self.refresh_all()
+                self.query_one("#view-packets").focus()
+
+        self.app.push_screen(FollowStreamScreen(self.session, flow), done)
 
     @on(VirtualTable.Highlighted, "#view-findings")
     def finding_highlighted(self, event: VirtualTable.Highlighted) -> None:
@@ -893,6 +936,17 @@ class MainScreen(Screen):
             self.focus_host = ref.split("|")[0]
             self._switch_center("map")
             self.refresh_all()
+        elif kind == "flow":
+            flow = s.flow(ref)
+            if flow is None:
+                self.app.notify("that flow is not in the current filtered view", severity="warning")
+                return
+            if s.timeline.cursor < flow.first:
+                s.timeline.set_cursor(flow.last)
+            s.selection = Selection("flow", ref)
+            self._switch_center("flows")
+            self.refresh_all()
+            self.query_one("#view-flows").focus()
 
     def show_evidence(self, finding_id: str) -> None:
         s = self.session
@@ -919,6 +973,58 @@ class MainScreen(Screen):
         sel = self.session.selection
         if sel is not None and sel.kind == "finding":
             self.show_evidence(sel.ref)
+        elif sel is not None and sel.kind == "flow":
+            self.follow_stream(sel.ref)
+
+    # flows -------------------------------------------------------------------------
+    def _refresh_flows(self) -> None:
+        s = self.session
+        table = self.query_one("#view-flows", VirtualTable)
+        if s.view is None:
+            return
+        if s.view.flows_cache is None and len(s.view) > SYNC_FILTER_LIMIT:
+            self.query_one("#center-panel").border_title = "FLOWS \u00b7 building flow table\u2026"
+            self._flows_worker(s.view)
+            return
+        tl = s.timeline
+        lo, hi = tl.window()
+        flows = [f for f in flows_in_window(s.flows(), lo, hi) if f.first <= tl.cursor]
+        key, rev = self.flow_sort
+        if key == "bytes":
+            flows.sort(key=lambda f: (-f.bytes, f.first))
+        elif key == "packets":
+            flows.sort(key=lambda f: (-f.packets, f.first))
+        elif key == "state":
+            flows.sort(key=lambda f: (f.state, f.first))
+        if rev:
+            flows.reverse()
+        self.flow_rows = flows
+        cursor = tl.cursor
+        warn = {"reset", "refused", "no reply", "half-open"}
+
+        def row(i: int) -> list:
+            f = flows[i]
+            mark = ("flow", f.ref) in self.bookmarked
+            dur = fmt_duration(f.duration) + ("+" if f.last > cursor else "")
+            return [
+                Text(("\u25a0 " if mark else "") + f.state, style=theme.S_AMBER if (mark or f.state in warn) else theme.S_TEXT),
+                f.proto,
+                Text(f.endpoint("a"), style=theme.S_CYAN if f.initiator_known else theme.S_TEXT),
+                f.endpoint("b"),
+                f"{f.pkts_ab:,}/{f.pkts_ba:,}",
+                fmt_bytes(f.bytes),
+                Text(dur, style=theme.S_DIM),
+                f.app or "",
+            ]
+
+        sel = s.selection
+        keep = sel.ref if sel is not None and sel.kind == "flow" else table.current_key()
+        index = {f.ref: i for i, f in enumerate(flows)}
+        table.set_data(len(flows), row, lambda i: flows[i].ref, keep_key=keep, locate=index.get, notify=False)
+        title = f"FLOWS {len(flows):,} in window" + (" (filtered)" if s.filter else "")
+        if key != "time" or rev:
+            title += f" \u00b7 sorted by {key}{' desc' if rev else ''}"
+        self.query_one("#center-panel").border_title = title + " \u00b7 cyan client = initiator proven by SYN"
 
     # ------------------------------------------------------------------ actions: files & filters
     def action_open(self) -> None:
@@ -961,6 +1067,17 @@ class MainScreen(Screen):
             self.busy = "FILTERING"
             self._refresh_status()
             self._filter_worker(flt)
+
+    @work(thread=True, exclusive=True, group="flows")
+    def _flows_worker(self, view: CaptureView) -> None:
+        flows = build_flows(self.session.capture.index.packets, view.rows)
+        if not get_current_worker().is_cancelled:
+            self.app.call_from_thread(self._flows_built, view, flows)
+
+    def _flows_built(self, view: CaptureView, flows) -> None:
+        view.flows_cache = flows
+        if self.session.view is view and self.center_view == "flows":
+            self._refresh_flows()
 
     @work(thread=True, exclusive=True, group="filter")
     def _filter_worker(self, flt: PacketFilter) -> None:
@@ -1134,6 +1251,9 @@ class MainScreen(Screen):
         elif target.kind == "finding":
             f = s.capture.finding(target.ref)
             label = f.title if f else ""
+        elif target.kind == "flow":
+            flow = s.flow(target.ref)
+            label = f"{flow.proto} {flow.endpoint('a')} -> {flow.endpoint('b')} {flow.state}" if flow else ""
         try:
             now = s.toggle_bookmark(target, label)
         except StorageError as exc:
@@ -1235,6 +1355,10 @@ class MainScreen(Screen):
             key, rev = self.host_sort
             self.host_sort = (key, not rev) if reverse else (HOST_SORTS[(HOST_SORTS.index(key) + 1) % len(HOST_SORTS)], False)
             self._refresh_hosts()
+        elif fid == "view-flows":
+            key, rev = self.flow_sort
+            self.flow_sort = (key, not rev) if reverse else (FLOW_SORTS[(FLOW_SORTS.index(key) + 1) % len(FLOW_SORTS)], False)
+            self._refresh_flows()
         elif fid == "view-findings":
             key, rev = self.finding_sort
             self.finding_sort = (key, not rev) if reverse else (FINDING_SORTS[(FINDING_SORTS.index(key) + 1) % len(FINDING_SORTS)], False)

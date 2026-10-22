@@ -12,11 +12,13 @@ from pathlib import Path
 
 from trace_zero.analysis.anomaly import Finding, detect
 from trace_zero.analysis.filters import PacketFilter, compile_filter, frames_filter
+from trace_zero.analysis.flows import Flow, build_flows
 from trace_zero.analysis.index import CaptureIndex, CaptureView, WindowStats
 from trace_zero.analysis.timeline import Timeline
 from trace_zero.config import Config
 from trace_zero.models import ParseResult
-from trace_zero.parsing.reader import CancelFn, ProgressFn, read_capture
+from trace_zero.analysis.streams import Stream, reassemble
+from trace_zero.parsing.reader import CancelFn, ProgressFn, read_capture, read_frames
 from trace_zero.storage import Investigation, Store
 
 
@@ -43,6 +45,10 @@ def load_capture(path: str | Path, config: Config, progress: ProgressFn | None =
     if progress:
         progress("analysing", len(result.packets), result.file.size, result.file.size)
     findings = detect(index, config.anomaly)
+    if progress:
+        progress("flows", len(result.packets), result.file.size, result.file.size)
+    # Precompute the flow table for the unfiltered view while still off the UI thread.
+    index.view(None, key="").flows_cache = build_flows(index.packets, index.order)
     return LoadedCapture(result, index, findings)
 
 
@@ -57,6 +63,9 @@ class Selection:
             return f"frame #{self.ref}"
         if self.kind == "conversation":
             return self.ref.replace("|", " <-> ")
+        if self.kind == "flow":
+            proto, a, ap, b, bp, _first = (self.ref.split("|") + [""] * 6)[:6]
+            return f"{proto} {a}:{ap} <-> {b}:{bp}".replace(":None", "")
         return self.ref
 
 
@@ -126,6 +135,30 @@ class Session:
         self.view = view
         if flt is not None:
             self.store.log(self.investigation.id, "filter", f"filter applied: {flt.display}")
+
+    # -- flows and streams ---------------------------------------------------------------
+    def flows(self) -> list[Flow]:
+        """Flows of the current (filtered) view, built once per view."""
+        assert self.capture is not None and self.view is not None
+        cached = getattr(self.view, "flows_cache", None)
+        if cached is None:
+            cached = build_flows(self.capture.index.packets, self.view.rows)
+            self.view.flows_cache = cached
+        return cached
+
+    def flow(self, ref: str) -> Flow | None:
+        return next((f for f in self.flows() if f.ref == ref), None)
+
+    def frame_bytes(self, frames: set[int]) -> dict[int, tuple[bytes, int]]:
+        """Re-read raw frames from the capture file(s). Safe in a worker thread."""
+        assert self.capture is not None
+        return read_frames(self.capture.result.file, frames)
+
+    def follow(self, flow: Flow) -> Stream:
+        idx = self.capture.index
+        frames = self.frame_bytes(set(flow.frames))
+        timestamps = {no: idx.packet(no).ts for no in flow.frames if idx.packet(no) is not None}
+        return reassemble(flow, frames, timestamps)
 
     def evidence_filter(self, finding: Finding) -> PacketFilter:
         return frames_filter(set(finding.frames), f"evidence:{finding.id}")

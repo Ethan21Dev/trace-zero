@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import socket
 import struct
+import threading
 
-from trace_zero.models import DnsAnswer, DnsInfo, PacketRecord
+from trace_zero.models import DhcpInfo, DnsAnswer, DnsInfo, PacketRecord
 from trace_zero.parsing.scapy_bridge import DNS, Raw
+from trace_zero.parsing.tls import looks_like_tls, parse_tls
 from trace_zero.sanitize import clean
 
 _U16 = struct.Struct("!H")
@@ -23,6 +25,26 @@ _SLL_PROTO = struct.Struct("!H")
 
 DNS_PORTS = {53: "DNS", 5353: "MDNS", 5355: "LLMNR"}
 HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ", b"TRACE ")
+
+_local = threading.local()
+
+
+def _sink(payload: bytes) -> None:
+    sink = getattr(_local, "sink", None)
+    if sink is not None:
+        sink.append(payload)
+
+
+def decode_with_payload(no: int, ts: float, data: bytes, linktype: int) -> tuple[PacketRecord, bytes | None]:
+    """Decode a frame and also return its TCP/UDP payload bytes (captured part only)."""
+    _local.sink = []
+    try:
+        rec = decode_frame(no, ts, data, len(data), linktype)
+        payload = _local.sink[0] if _local.sink else None
+    finally:
+        _local.sink = None
+    return rec, payload
+
 
 _ip_cache: dict[bytes, str] = {}
 _mac_cache: dict[bytes, str] = {}
@@ -287,6 +309,7 @@ def _decode_l4(
             return
         start = p + doff
         rec.payload_len = max(0, declared_end - start)
+        _sink(data[start:cap_end] if start < cap_end else b"")
         if start < cap_end:
             payload = data[start:cap_end]
             if 53 in (sport, dport) and len(payload) > 2:
@@ -307,9 +330,12 @@ def _decode_l4(
             errors.append(f"invalid UDP length {ulen}")
             rec.payload_len = max(0, declared_end - p - 8)
             end = cap_end
+        _sink(data[p + 8 : end] if end > p + 8 else b"")
         label = DNS_PORTS.get(dport) or DNS_PORTS.get(sport)
         if label and end > p + 8:
             _decode_dns(rec, data[p + 8 : end], label, errors, max_dns)
+        elif {sport, dport} <= {67, 68} and end > p + 8:
+            _decode_dhcp(rec, data[p + 8 : end], errors)
     elif proto in (1, 58):
         rec.transport = "ICMP" if proto == 1 else "ICMPv6"
         if cap_end - p < 4:
@@ -318,6 +344,8 @@ def _decode_l4(
         rec.icmp_type = data[p]
         rec.icmp_code = data[p + 1]
         rec.payload_len = max(0, declared_end - p - 4)
+        if (proto == 1 and rec.icmp_type in (3, 4, 5, 11, 12)) or (proto == 58 and rec.icmp_type in (1, 2, 3, 4)):
+            rec.icmp_orig = _quoted_packet(data, p + 8, cap_end, proto == 58)
     else:
         rec.payload_len = max(0, declared_end - p)
 
@@ -405,51 +433,89 @@ def _decode_tcp_app(rec: PacketRecord, payload: bytes) -> None:
         status = payload[: line_end if line_end >= 0 else 64]
         rec.app = "HTTP"
         rec.app_info = clean(_bytes_text(status), 120)
-    elif len(payload) >= 6 and payload[0] == 0x16 and payload[1] == 0x03 and payload[5] in (1, 2):
-        if payload[5] == 1:
-            sni = _tls_sni(payload)
+    elif payload[:1] == b"\x16" and looks_like_tls(payload):
+        # Only handshake records are labelled: a bare 0x17 0x03 prefix is too weak a signal.
+        info = parse_tls(payload)
+        if info is not None and info.messages:
             rec.app = "TLS"
-            if sni is None:
-                rec.app_info = "ClientHello (SNI not present or not decodable)"
-            else:
-                rec.app_info = clean(f"ClientHello SNI={sni}", 200)
-        else:
-            rec.app = "TLS"
-            rec.app_info = "ServerHello"
+            rec.tls = info
+            rec.app_info = clean(info.summary, 200)
 
 
 def _bytes_text(b: bytes) -> str:
     return b.decode("utf-8", errors="backslashreplace")
 
 
-def _tls_sni(payload: bytes) -> str | None:
-    """Extract server_name from a TLS ClientHello. Returns None on any inconsistency."""
+_PROTO_NAMES = {1: "ICMP", 6: "TCP", 17: "UDP", 58: "ICMPv6"}
+
+
+def _quoted_packet(data: bytes, q: int, end: int, v6: bool) -> tuple | None:
+    """Decode the original packet quoted inside an ICMP error (header + first 8 bytes)."""
     try:
-        p = 5  # record header
-        if payload[p] != 1:
-            return None
-        hs_len = int.from_bytes(payload[p + 1 : p + 4], "big")
-        end = min(len(payload), p + 4 + hs_len)
-        p += 4 + 2 + 32  # handshake header, client_version, random
-        if p >= end:
-            return None
-        p += 1 + payload[p]  # session id
-        cs_len = _U16.unpack_from(payload, p)[0]
-        p += 2 + cs_len
-        p += 1 + payload[p]  # compression methods
-        ext_total = _U16.unpack_from(payload, p)[0]
-        p += 2
-        ext_end = min(end, p + ext_total)
-        while p + 4 <= ext_end:
-            etype, elen = struct.unpack_from("!HH", payload, p)
-            p += 4
-            if etype == 0 and p + 5 <= ext_end:
-                name_len = _U16.unpack_from(payload, p + 3)[0]
-                name = payload[p + 5 : p + 5 + name_len]
-                if len(name) != name_len:
-                    return None
-                return clean(_bytes_text(name), 255)
-            p += elen
-    except (IndexError, struct.error):
+        if v6:
+            if end - q < 40 or data[q] >> 4 != 6:
+                return None
+            nh = data[q + 6]
+            src, dst = _ip(data[q + 8 : q + 24]), _ip(data[q + 24 : q + 40])
+            l4 = q + 40
+        else:
+            if end - q < 20 or data[q] >> 4 != 4:
+                return None
+            ihl = (data[q] & 0x0F) * 4
+            if ihl < 20:
+                return None
+            nh = data[q + 9]
+            src, dst = _ip(data[q + 12 : q + 16]), _ip(data[q + 16 : q + 20])
+            l4 = q + ihl
+        sport = dport = None
+        if nh in (6, 17) and end - l4 >= 4:
+            sport, dport = struct.unpack_from("!HH", data, l4)
+        return (_PROTO_NAMES.get(nh, f"IP/{nh}"), src, sport, dst, dport)
+    except (IndexError, struct.error, ValueError):
         return None
-    return None
+
+
+_DHCP_COOKIE = b"\x63\x82\x53\x63"
+
+
+def _decode_dhcp(rec: PacketRecord, payload: bytes, errors: list[str]) -> None:
+    if len(payload) < 236:
+        errors.append("DHCP/BOOTP payload too short")
+        return
+    op, htype, hlen = payload[0], payload[1], payload[2]
+    xid = struct.unpack_from("!I", payload, 4)[0]
+    ciaddr, yiaddr = _ip(payload[12:16]), _ip(payload[16:20])
+    mac = _mac(payload[28:34]) if htype == 1 and hlen == 6 else None
+    info = DhcpInfo(op=op, xid=xid, msg_type=None, client_mac=mac, ciaddr=ciaddr, yiaddr=yiaddr)
+    if payload[236:240] == _DHCP_COOKIE:
+        pos = 240
+        for _ in range(255):
+            if pos >= len(payload):
+                break
+            code = payload[pos]
+            if code == 0:
+                pos += 1
+                continue
+            if code == 255 or pos + 1 >= len(payload):
+                break
+            length = payload[pos + 1]
+            val = payload[pos + 2 : pos + 2 + length]
+            pos += 2 + length
+            if len(val) < length:
+                errors.append("DHCP option truncated")
+                break
+            if code == 53 and length >= 1:
+                info.msg_type = val[0]
+            elif code == 12:
+                info.hostname = clean(_bytes_text(val), 64)
+            elif code == 50 and length == 4:
+                info.requested_ip = _ip(val)
+            elif code == 54 and length == 4:
+                info.server_id = _ip(val)
+            elif code == 60:
+                info.vendor_class = clean(_bytes_text(val), 64)
+            elif code == 51 and length == 4:
+                info.lease_s = struct.unpack("!I", val)[0]
+    rec.app = "DHCP"
+    rec.dhcp = info
+    rec.app_info = clean(info.summary, 200)

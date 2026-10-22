@@ -180,8 +180,20 @@ def host(session: Session, ip: str, stats: WindowStats | None) -> Group:
             doc.kv("initiated to", ", ".join(f"{proto}/{port}" for (proto, port), _ in top))
         if meta.dns_queries:
             doc.kv("DNS queries", f"{meta.dns_queries:,}")
-        doc.dim("Only metadata present in the capture is shown; hostnames come")
-        doc.dim("solely from DNS answers observed in this capture.")
+        if meta.dhcp_names:
+            doc.kv("DHCP name", ", ".join(f"{n} (#{no})" for n, no in list(meta.dhcp_names.items())[:3]))
+        if meta.tls_names:
+            doc.kv("TLS names", ", ".join(f"{n} (#{no})" for n, no in list(meta.tls_names.items())[:5]))
+        if meta.tls_client_fps:
+            doc.kv("JA4 sent", ", ".join(f"{fp} \u00d7{n}" for fp, n in meta.tls_client_fps.most_common(3)))
+        if meta.tls_server_fps:
+            doc.kv("JA3S sent", ", ".join(f"{fp} \u00d7{n}" for fp, n in meta.tls_server_fps.most_common(3)))
+        enrich = getattr(session, "enrichment", None)
+        if enrich is not None:
+            for key, value in enrich.describe_host(ip, list(meta.macs)):
+                doc.kv(key, value)
+        doc.dim("Only metadata present in the capture is shown. Names come from")
+        doc.dim("DNS answers, DHCP host-name options or TLS handshakes observed here.")
     related = [f for f in session.capture.findings if ip in f.hosts]
     if related:
         doc.section("POSSIBLE ANOMALIES", "heuristic")
@@ -242,6 +254,31 @@ def conversation(session: Session, ref: str, stats: WindowStats | None) -> Group
     return doc.render()
 
 
+def _tls_section(doc: Doc, t) -> None:
+    from trace_zero.parsing.tls import TLS_VERSIONS
+
+    doc.section("TLS", "decoded handshake")
+    doc.kv("messages", ", ".join(t.messages))
+    doc.kv("SNI", t.sni)
+    if t.alpn:
+        doc.kv("ALPN", ", ".join(t.alpn))
+    if t.client_versions:
+        doc.kv("offers", ", ".join(TLS_VERSIONS.get(v, f"0x{v:04x}") for v in t.client_versions))
+    doc.kv("JA4", t.ja4)
+    doc.kv("JA3", t.ja3)
+    if t.server_version is not None:
+        doc.kv("version", TLS_VERSIONS.get(t.server_version, f"0x{t.server_version:04x}"))
+        doc.kv("cipher", f"0x{t.cipher:04x}")
+        doc.kv("JA3S", t.ja3s)
+    doc.kv("cert subject", t.cert_subject_cn)
+    doc.kv("cert issuer", t.cert_issuer_cn)
+    if t.cert_san:
+        doc.kv("cert SAN", ", ".join(t.cert_san[:6]))
+    for err in t.errors:
+        doc.kv("issue", Text(err, style=theme.S_AMBER))
+    doc.dim("Fingerprints describe client/server TLS stacks; they are not identities.")
+
+
 def packet(session: Session, p: PacketRecord, raw: dict | None = None, hex_per_line: int = 16) -> Group:
     doc = Doc()
     idx = session.capture.index
@@ -288,6 +325,10 @@ def packet(session: Session, p: PacketRecord, raw: dict | None = None, hex_per_l
             names = ICMP_TYPES if p.transport == "ICMP" else ICMPV6_TYPES
             doc.kv("type", f"{p.icmp_type} {names.get(p.icmp_type, '')}".strip())
             doc.kv("code", p.icmp_code)
+            if p.icmp_orig:
+                proto, osrc, osport, odst, odport = p.icmp_orig
+                doc.kv("quoted packet", f"{proto} {osrc}{':' + str(osport) if osport is not None else ''} \u2192 {odst}{':' + str(odport) if odport is not None else ''}")
+                doc.dim("the ICMP error refers to this earlier flow (enter on flows view)")
         doc.kv("payload", f"{p.payload_len} B" if p.payload_len is not None else None)
     if p.dns is not None:
         d = p.dns
@@ -304,6 +345,23 @@ def packet(session: Session, p: PacketRecord, raw: dict | None = None, hex_per_l
             doc.kv("truncated", "TC bit set")
         if d.malformed:
             doc.kv("malformed", Text(d.malformed, style=theme.S_AMBER))
+    elif p.tls is not None:
+        _tls_section(doc, p.tls)
+    elif p.dhcp is not None:
+        d = p.dhcp
+        doc.section("DHCP", "decoded")
+        doc.kv("message", d.type_name)
+        doc.kv("transaction", f"0x{d.xid:08x}")
+        doc.kv("client MAC", d.client_mac)
+        doc.kv("host-name", d.hostname)
+        doc.kv("requested IP", d.requested_ip)
+        if d.yiaddr and d.yiaddr != "0.0.0.0":
+            doc.kv("assigned IP", d.yiaddr)
+        if d.ciaddr and d.ciaddr != "0.0.0.0":
+            doc.kv("client IP", d.ciaddr)
+        doc.kv("server id", d.server_id)
+        doc.kv("vendor class", d.vendor_class)
+        doc.kv("lease", f"{d.lease_s} s" if d.lease_s is not None else None)
     elif p.app and p.app_info:
         doc.section(p.app, "decoded")
         doc.line(p.app_info)
@@ -340,6 +398,41 @@ def packet(session: Session, p: PacketRecord, raw: dict | None = None, hex_per_l
             doc.line(line, theme.S_FAINT)
         if raw.get("clipped"):
             doc.dim(f"... clipped at {raw['clipped']:,} bytes")
+    return doc.render()
+
+
+def flow(session: Session, f) -> Group:
+    from trace_zero.analysis.flows import STATE_HELP
+
+    doc = Doc()
+    doc.section(f"FLOW {f.proto}", "observed")
+    doc.kv("client" if f.initiator_known else "first sender", f.endpoint("a"))
+    doc.kv("server" if f.initiator_known else "other side", f.endpoint("b"))
+    doc.kv("initiator", "proven by SYN / echo request" if f.initiator_known else "not proven; first packet seen")
+    doc.kv("state", f.state, theme.S_AMBER if f.state in ("reset", "refused", "no reply", "half-open") else theme.S_TEXT)
+    doc.dim(STATE_HELP.get(f.state, ""))
+    doc.kv("first", fmt_ts(f.first, True))
+    doc.kv("last", fmt_ts(f.last, True))
+    doc.kv("duration", fmt_duration(f.duration))
+    if session.timeline and f.last > session.timeline.cursor:
+        doc.kv("at cursor", Text("flow continues after the cursor position", style=theme.S_AMBER))
+    doc.kv("client \u2192", f"{f.pkts_ab:,} pkts  {fmt_bytes(f.bytes_ab)}  payload {fmt_bytes(f.payload_ab)}")
+    doc.kv("server \u2192", f"{f.pkts_ba:,} pkts  {fmt_bytes(f.bytes_ba)}  payload {fmt_bytes(f.payload_ba)}")
+    if f.apps:
+        doc.kv("decoded as", ", ".join(f"{a} {n}" for a, n in f.apps.most_common(4)))
+    if f.proto == "TCP":
+        flags = [name for name, on in (("SYN", f.syn), ("SYN-ACK", f.synack), ("FIN client", f.fin_a), ("FIN server", f.fin_b), ("RST client", f.rst_a), ("RST server", f.rst_b)) if on]
+        doc.kv("TCP seen", ", ".join(flags) or "no control flags")
+    doc.kv("frames", f"{len(f.frames):,}  (#{f.frames[0]} \u2026 #{f.frames[-1]})")
+    if f.icmp_errors:
+        doc.section("ICMP ERRORS", "quoting this flow", theme.S_AMBER)
+        idx = session.capture.index
+        for no in f.icmp_errors[:10]:
+            p = idx.packet(no)
+            if p is not None:
+                doc.line(Text.assemble((f"#{no} ", theme.S_DIM), (f"{p.src} ", theme.S_TEXT), (p.info, theme.S_AMBER)))
+    doc.dim("enter: follow stream (reassembled payload)")
+    _notes(doc, session, "flow", f.ref)
     return doc.render()
 
 

@@ -100,3 +100,65 @@ def test_sql_injection_is_inert(store):
     tables = {r[0] for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "investigations" in tables
     assert len(store.list_investigations()) == 1
+
+
+V1_SCHEMA = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO meta VALUES ('schema_version', '1');
+CREATE TABLE investigations (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL, updated_at REAL NOT NULL);
+CREATE TABLE bookmarks (id INTEGER PRIMARY KEY, investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+    capture_sha256 TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('packet', 'host', 'finding', 'conversation')),
+    ref TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, UNIQUE (investigation_id, capture_sha256, kind, ref));
+CREATE TABLE notes (id INTEGER PRIMARY KEY, investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+    capture_sha256 TEXT NOT NULL DEFAULT '', target_kind TEXT NOT NULL CHECK (target_kind IN ('investigation', 'packet', 'host', 'finding', 'conversation')),
+    target_ref TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL);
+INSERT INTO investigations VALUES (1, 'Old case', '', 1, 1);
+INSERT INTO bookmarks VALUES (1, 1, 'sha', 'packet', '42', 'old label', 1);
+INSERT INTO notes VALUES (1, 1, 'sha', 'host', '10.0.0.1', 'old note', 1, 1);
+"""
+
+
+def test_v1_database_migrates_in_place(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "v1.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(V1_SCHEMA)
+    conn.close()
+    store = Store(path)
+    inv = store.find_investigation("Old case")
+    assert [b.ref for b in store.bookmarks(inv.id, "sha")] == ["42"]
+    assert [n.body for n in store.notes(inv.id, "sha")] == ["old note"]
+    assert store.toggle_bookmark(inv.id, "sha", "flow", "TCP|a|1|b|2|7") is True  # new kind accepted
+    assert store.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    store.close()
+    Store(path).close()  # reopening a migrated database is a no-op
+
+
+def test_marks_triage_suppressions_filters(store):
+    inv = store.create_investigation("T")
+    m = store.add_mark(inv.id, "sha", 12.5, "  lateral   movement starts ")
+    assert [(x.ts, x.label) for x in store.marks(inv.id, "sha")] == [(12.5, "lateral movement starts")]
+    store.delete_mark(inv.id, m)
+    assert store.marks(inv.id, "sha") == []
+    store.set_finding_status(inv.id, "sha", "TZ-R1-x", "benign", "known backup job")
+    store.set_finding_status(inv.id, "sha", "TZ-R1-x", "escalated", "")
+    assert store.finding_statuses(inv.id, "sha") == {"TZ-R1-x": ("escalated", "")}
+    with pytest.raises(StorageError):
+        store.set_finding_status(inv.id, "sha", "TZ-R1-x", "ignored")
+    with pytest.raises(StorageError):
+        store.add_suppression(inv.id, "TZ-R5", "", "  ")
+    store.add_suppression(inv.id, "TZ-R5", "10.0.0.5", "monitoring agent")
+    sup = store.suppressions(inv.id)[0]
+    assert sup.matches("TZ-R5", ("10.0.0.5", "10.0.0.9")) and not sup.matches("TZ-R5", ("10.0.0.6",)) and not sup.matches("TZ-R1", ("10.0.0.5",))
+    for i in range(60):
+        store.record_filter(f"port:{i}")
+    store.record_filter("port:3")
+    hist = store.filter_history()
+    assert len(hist) == 50 and hist[0] == "port:3"
+    store.save_filter("web", "port:80|443")
+    store.save_filter("web", "port:443")
+    assert store.saved_filters() == [("web", "port:443")]
+    store.delete_saved_filter("web")
+    assert store.saved_filters() == []

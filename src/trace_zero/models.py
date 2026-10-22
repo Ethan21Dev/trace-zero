@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trace_zero.parsing.tls import TlsInfo
 
 TCP_FIN = 0x01
 TCP_SYN = 0x02
@@ -114,6 +118,41 @@ class DnsInfo:
         return DNS_RCODES.get(self.rcode, str(self.rcode))
 
 
+DHCP_TYPES = {1: "DISCOVER", 2: "OFFER", 3: "REQUEST", 4: "DECLINE", 5: "ACK", 6: "NAK", 7: "RELEASE", 8: "INFORM"}
+
+
+@dataclass(slots=True)
+class DhcpInfo:
+    op: int
+    xid: int
+    msg_type: int | None
+    client_mac: str | None
+    ciaddr: str | None
+    yiaddr: str | None
+    hostname: str | None = None
+    requested_ip: str | None = None
+    server_id: str | None = None
+    vendor_class: str | None = None
+    lease_s: int | None = None
+
+    @property
+    def type_name(self) -> str:
+        return DHCP_TYPES.get(self.msg_type or 0, f"type {self.msg_type}") if self.msg_type else "BOOTP"
+
+    @property
+    def summary(self) -> str:
+        parts = [f"DHCP {self.type_name} xid=0x{self.xid:08x}"]
+        if self.client_mac:
+            parts.append(f"client {self.client_mac}")
+        if self.hostname:
+            parts.append(f"host-name {self.hostname}")
+        if self.requested_ip:
+            parts.append(f"requested {self.requested_ip}")
+        if self.yiaddr and self.yiaddr != "0.0.0.0":
+            parts.append(f"assigned {self.yiaddr}")
+        return " ".join(parts)
+
+
 @dataclass(slots=True)
 class PacketRecord:
     """One captured frame, decoded as far as the data safely allows."""
@@ -148,6 +187,10 @@ class PacketRecord:
     app: str | None = None  # DNS / MDNS / LLMNR / HTTP / TLS (only when decoded)
     app_info: str | None = None  # decoded, sanitised application detail
     dns: DnsInfo | None = None
+    tls: TlsInfo | None = None
+    dhcp: DhcpInfo | None = None
+    # ICMP error messages quote the packet that caused them: (proto, src, sport, dst, dport).
+    icmp_orig: tuple[str, str, int | None, str, int | None] | None = None
     errors: tuple[str, ...] = ()
 
     @property
@@ -206,6 +249,11 @@ class PacketRecord:
             names = ICMP_TYPES if self.transport == "ICMP" else ICMPV6_TYPES
             name = names.get(self.icmp_type or -1, f"type={self.icmp_type}")
             parts.append(f"{name} code={self.icmp_code}")
+            if self.icmp_orig:
+                proto, osrc, osport, odst, odport = self.icmp_orig
+                a = f"{osrc}:{osport}" if osport is not None else osrc
+                b = f"{odst}:{odport}" if odport is not None else odst
+                parts.append(f"for {proto} {a} -> {b}")
         elif self.transport == "UDP":
             parts.append(f"len={self.payload_len}")
         elif self.net == "ARP":

@@ -271,3 +271,34 @@ def read_frame_bytes(info: FileInfo, no: int) -> tuple[bytes, int]:
                 linktype = getattr(meta, "linktype", None)
                 return data, linktype if linktype is not None else static_linktype
     raise CaptureError(f"frame {no} not found")
+
+
+def read_frames(info: FileInfo, wanted: set[int] | frozenset[int], limit_bytes: int = 256 * 1024 * 1024) -> dict[int, tuple[bytes, int]]:
+    """Re-read several frames (1-based numbers) in one pass. Stops after the highest wanted frame."""
+    path = Path(info.path)
+    try:
+        st = path.stat()
+    except OSError as exc:
+        raise CaptureError(f"capture no longer accessible: {exc.strerror or exc}") from exc
+    if st.st_size != info.size or st.st_mtime_ns != info.mtime_ns:
+        raise CaptureError("capture file changed on disk since import; re-open it to read packet contents")
+    out: dict[int, tuple[bytes, int]] = {}
+    if not wanted:
+        return out
+    last = max(wanted)
+    total = 0
+    with open(path, "rb") as raw_fh:
+        reader = _open_reader(_GuardedFile(raw_fh), path, info.fmt)
+        static_linktype = getattr(reader, "linktype", -1)
+        for current in range(1, last + 1):
+            try:
+                data, meta = reader._read_packet(size=_MAX_FRAME)
+            except (EOFError, Scapy_Exception, struct.error, OSError):
+                break
+            if current in wanted:
+                linktype = getattr(meta, "linktype", None)
+                out[current] = (data, linktype if linktype is not None else static_linktype)
+                total += len(data)
+                if total > limit_bytes:
+                    break
+    return out
