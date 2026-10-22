@@ -534,3 +534,51 @@ async def test_triage_and_suppression_keys(tmp_path, sample_pcap):
         rep = build_report(s)
         exported = {f["id"]: f for f in rep["heuristic_findings"]["findings"]}
         assert exported[fid]["analyst_status"] == "benign" and exported[fid]["suppressed_by"]["reason"] == "known noisy in this network"
+
+
+async def test_window_diff_and_marks(tmp_path, sample_pcap):
+    app, s = make_app(tmp_path, sample_pcap)
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        main = screen(app)
+        tl = s.timeline
+        await pilot.press("w")  # sliding window
+        await pilot.press("home")
+        for _ in range(4):
+            await pilot.press("right")
+        await pilot.press("d")
+        assert main.center_view == "diff" and main.diff_base == tl.window()
+        base = main.diff_base
+        await pilot.press("end")
+        await pilot.pause()
+        table = main.query_one("#view-diff", VirtualTable)
+        assert table.count > 0 and main._diff_cache[1].b == tl.window() and main._diff_cache[1].a == base
+        # Enter on a NEW HOST row jumps to that host on the map.
+        rows = main._diff_cache[1].rows
+        target = next(i for i, r in enumerate(rows) if r.change == "NEW HOST")
+        table.move_to(target)
+        await pilot.press("enter")
+        assert main.center_view == "map" and main.focus_host == rows[target].ref
+        # Marks: add two, then jump between them.
+        await pilot.press("home")
+        await pilot.press("right")
+        await pilot.press("k")
+        app.screen.query_one(Input).value = "first contact"
+        await pilot.press("enter")
+        first = tl.cursor
+        await pilot.press("right")
+        await pilot.press("right")
+        await pilot.press("k")
+        await pilot.press("enter")  # default label
+        second = tl.cursor
+        assert [m.label for m in s.marks()][0] == "first contact" and len(s.marks()) == 2
+        await pilot.press("home")
+        await pilot.press("right_curly_bracket")
+        assert tl.cursor == first
+        await pilot.press("right_curly_bracket")
+        assert tl.cursor == second
+        await pilot.press("left_curly_bracket")
+        assert tl.cursor == first
+        assert second in main.mark_times
+        await pilot.press("D")
+        assert main.diff_base is None

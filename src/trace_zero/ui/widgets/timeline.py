@@ -26,6 +26,7 @@ class TimelineSnapshot:
     window_bytes: int
     event_label: str | None
     filtered: bool
+    baseline: tuple[float, float] | None = None
 
 
 class TimelinePanel(Widget, can_focus=True):
@@ -94,6 +95,11 @@ class TimelinePanel(Widget, can_focus=True):
             c = col_of(ft)
             axis[c] = "◆"
             axis_style[c] = theme.S_AMBER
+        if snap.baseline is not None:
+            for c in range(col_of(snap.baseline[0]), col_of(snap.baseline[1]) + 1):
+                if axis[c] in ("\u2500", "\u2550"):
+                    axis[c] = "\u2501"
+                    axis_style[c] = theme.S_GREEN
         for mt in snap.mark_times:
             c = col_of(mt)
             axis[c] = "\u2691"

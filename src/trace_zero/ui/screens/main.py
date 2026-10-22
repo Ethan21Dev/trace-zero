@@ -19,6 +19,7 @@ from textual.worker import Worker, get_current_worker
 
 from trace_zero import PRODUCT, TAGLINE
 from trace_zero.analysis.anomaly import SEVERITY_ORDER
+from trace_zero.analysis.diff import diff_windows
 from trace_zero.analysis.filters import FilterError, PacketFilter, frames_filter
 from trace_zero.analysis.flows import build_flows, flows_in_window
 from trace_zero.analysis.index import H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS_OUT, CaptureView, WindowStats, ip_sort_key
@@ -60,11 +61,12 @@ PEER_COLS = [Col("", 2), Col("PEER / LINK"), Col("PKTS →/←", 13, "right"), C
 PACKET_COLS = [Col("NO", 7, "right"), Col("TIME UTC", 12), Col("SOURCE", 15), Col("DESTINATION", 15), Col("PROTO", 6), Col("LEN", 5, "right"), Col("INFO", min_width=12)]
 FINDING_COLS = [Col("SEV", 6), Col("RULE", 4), Col("TRIAGE", 6), Col("FIRST UTC", 12), Col("CONF", 4), Col("FINDING", min_width=16), Col("HOSTS", 18)]
 JOURNAL_COLS = [Col("WHEN (UTC)", 19), Col("TYPE", 8), Col("TARGET", 24), Col("DETAIL", min_width=10)]
-FLOW_COLS = [Col("STATE", 10), Col("PROTO", 6), Col("CLIENT / FIRST SENDER", min_width=14), Col("SERVER", min_width=14), Col("PKTS →/←", 11, "right"), Col("BYTES", 9, "right"), Col("DUR", 9, "right"), Col("APP", 5)]
+DIFF_COLS = [Col("CHANGE", 12), Col("ITEM", min_width=18), Col("A", 10, "right"), Col("B", 10, "right"), Col("DETAIL", 14)]
+FLOW_COLS = [Col("STATE", 9), Col("PROTO", 5), Col("CLIENT → SERVER", min_width=20), Col("PKTS →/←", 9, "right"), Col("BYTES", 8, "right"), Col("DUR", 8, "right"), Col("APP", 4)]
 
-VIEW_TITLES = {"map": "NETWORK MAP", "flows": "FLOWS", "packets": "PACKETS", "findings": "FINDINGS", "journal": "JOURNAL", "empty": TAGLINE}
+VIEW_TITLES = {"map": "NETWORK MAP", "flows": "FLOWS", "packets": "PACKETS", "findings": "FINDINGS", "diff": "WINDOW DIFF", "journal": "JOURNAL", "empty": TAGLINE}
 FLOW_SORTS = ["time", "bytes", "packets", "state"]
-VIEW_FOCUS = {"map": "#peers-table", "flows": "#view-flows", "packets": "#view-packets", "findings": "#view-findings", "journal": "#view-journal"}
+VIEW_FOCUS = {"map": "#peers-table", "flows": "#view-flows", "packets": "#view-packets", "findings": "#view-findings", "diff": "#view-diff", "journal": "#view-journal"}
 PACKET_SORTS = ["time", "no", "src", "dst", "proto", "len"]
 HOST_SORTS = ["bytes", "pkts", "address"]
 FINDING_SORTS = ["severity", "time", "rule", "status"]
@@ -119,6 +121,11 @@ class MainScreen(Screen):
         Binding("e", "export", "export"),
         Binding("X,shift+x", "export_pcap", "export packets"),
         Binding("T,shift+t", "triage", "triage finding"),
+        Binding("d", "diff", "compare windows"),
+        Binding("D,shift+d", "clear_diff", "clear baseline"),
+        Binding("k", "add_mark", "mark time"),
+        Binding("left_curly_bracket", "mark_step(-1)", "previous mark"),
+        Binding("right_curly_bracket", "mark_step(1)", "next mark"),
         Binding("z", "suppress", "suppress rule"),
         Binding("Z,shift+z", "toggle_suppressed", "show suppressed"),
         Binding("r", "rename", "rename"),
@@ -146,6 +153,8 @@ class MainScreen(Screen):
         self.finding_sort = ("severity", False)
         self.flow_sort = ("time", False)
         self.show_suppressed = False
+        self.diff_base: tuple[float, float] | None = None
+        self._diff_cache: tuple | None = None
         self.flow_rows: list = []
         self.finding_rows: list = []
         self.journal_rows: list[tuple] = []
@@ -177,6 +186,7 @@ class MainScreen(Screen):
                     yield VirtualTable(FLOW_COLS, id="view-flows", empty_text="no flows in window")
                     yield VirtualTable(PACKET_COLS, id="view-packets", empty_text="no packets in window")
                     yield VirtualTable(FINDING_COLS, id="view-findings", empty_text="no heuristic fired for this capture")
+                    yield VirtualTable(DIFF_COLS, id="view-diff", empty_text="press d to use the current window as baseline A")
                     yield VirtualTable(JOURNAL_COLS, id="view-journal", empty_text="no bookmarks, notes or activity yet")
             with VerticalScroll(id="inspector-panel", classes="panel"):
                 yield Static(id="inspector")
@@ -384,6 +394,8 @@ class MainScreen(Screen):
             self._refresh_findings()
         elif view == "journal":
             self._refresh_journal()
+        elif view == "diff":
+            self._refresh_diff()
         elif view == "map":
             self._refresh_map()
 
@@ -392,7 +404,7 @@ class MainScreen(Screen):
         self._refresh_status()
 
     def _refresh_tabs(self) -> None:
-        tabs = [("map", "n", "MAP"), ("flows", "c", "FLOWS"), ("packets", "p", "PACKETS"), ("findings", "f", "FINDINGS"), ("journal", "b", "JOURNAL")]
+        tabs = [("map", "n", "MAP"), ("flows", "c", "FLOWS"), ("packets", "p", "PACKETS"), ("findings", "f", "FINDINGS"), ("diff", "d", "DIFF"), ("journal", "b", "JOURNAL")]
         if self.compact:
             tabs = [("hosts", "h", "HOSTS")] + tabs + [("inspector", "i", "INSPECT")]
         active = self.center_view if (not self.compact or self.compact_panel == "center") else self.compact_panel
@@ -429,12 +441,14 @@ class MainScreen(Screen):
             keys += [("enter", "evidence"), ("T", "triage"), ("z", "suppress"), ("Z", "show suppressed"), ("a", "note"), ("s", f"sort:{self.finding_sort[0]}")]
         elif fid == "view-journal":
             keys += [("enter", "go to"), ("del", "delete")]
+        elif fid == "view-diff":
+            keys += [("enter", "go to"), ("d", "rebase A"), ("D", "clear"), ("k", "mark"), ("{ }", "marks")]
         elif fid == "view-flows":
             keys += [("enter", "follow stream"), ("m", "mark"), ("a", "note"), ("s", f"sort:{self.flow_sort[0]}")]
         elif fid == "peers-table":
             keys += [("enter", "inspect link"), ("m", "mark"), ("a", "note")]
         elif fid == "timeline":
-            keys += [("w", "mode"), ("[ ]", "width"), ("+ -", "speed"), ("home/end", "jump")]
+            keys += [("w", "mode"), ("[ ]", "width"), ("+ -", "speed"), ("home/end", "jump"), ("k", "mark"), ("{ }", "marks"), ("d", "diff")]
         else:
             keys += [("h n c p f b", "views"), ("w", "mode"), ("+ -", "speed")]
         keys += [("e", "export"), ("q", "back" if self.history else "quit")]
@@ -779,6 +793,7 @@ class MainScreen(Screen):
             counts=counts,
             finding_times=self.finding_times,
             mark_times=self.mark_times,
+            baseline=self.diff_base,
             window_packets=stats.packets if stats else 0,
             window_bytes=stats.bytes if stats else 0,
             event_label=label,
@@ -934,6 +949,13 @@ class MainScreen(Screen):
     def finding_activated(self, event: VirtualTable.Activated) -> None:
         self.show_evidence(event.key)
 
+    @on(VirtualTable.Activated, "#view-diff")
+    def diff_activated(self, event: VirtualTable.Activated) -> None:
+        row = next((r for r in (self._diff_cache[1].rows if self._diff_cache else []) if (r.change, r.item) == event.key), None)
+        if row is None or row.kind == "none":
+            return
+        self.goto(row.kind, row.ref)
+
     @on(VirtualTable.Activated, "#view-journal")
     def journal_activated(self, event: VirtualTable.Activated) -> None:
         row = next((r for r in self.journal_rows if r[4][:2] == event.key), None)
@@ -1051,11 +1073,14 @@ class MainScreen(Screen):
             f = flows[i]
             mark = ("flow", f.ref) in self.bookmarked
             dur = fmt_duration(f.duration) + ("+" if f.last > cursor else "")
+            arrow = " \u2192 " if f.initiator_known else " \u2014 "
+            ends = Text(f.a, style=theme.S_CYAN if f.initiator_known else theme.S_TEXT)
+            ends.append(arrow, theme.S_FAINT)
+            ends.append(f.endpoint("b"))
             return [
                 Text(("\u25a0 " if mark else "") + f.state, style=theme.S_AMBER if (mark or f.state in warn) else theme.S_TEXT),
                 f.proto,
-                Text(f.endpoint("a"), style=theme.S_CYAN if f.initiator_known else theme.S_TEXT),
-                f.endpoint("b"),
+                ends,
                 f"{f.pkts_ab:,}/{f.pkts_ba:,}",
                 fmt_bytes(f.bytes),
                 Text(dur, style=theme.S_DIM),
@@ -1069,7 +1094,7 @@ class MainScreen(Screen):
         title = f"FLOWS {len(flows):,} in window" + (" (filtered)" if s.filter else "")
         if key != "time" or rev:
             title += f" \u00b7 sorted by {key}{' desc' if rev else ''}"
-        self.query_one("#center-panel").border_title = title + " \u00b7 cyan client = initiator proven by SYN"
+        self.query_one("#center-panel").border_title = title + " \u00b7 \u2192 initiator proven, \u2014 not proven"
 
     # ------------------------------------------------------------------ actions: files & filters
     def action_open(self) -> None:
@@ -1479,6 +1504,90 @@ class MainScreen(Screen):
         self.app.notify(msg, title="packets exported", timeout=15)
         if self.center_view == "journal":
             self._refresh_journal()
+
+    # -- window diff and marks ---------------------------------------------------------------
+    def action_diff(self) -> None:
+        if not self._has_timeline():
+            return
+        window = self.session.timeline.window()
+        if self.diff_base is None or self.center_view == "diff":
+            self.diff_base = window
+            self._diff_cache = None
+            self.app.notify(
+                f"baseline A = {fmt_ts(window[0])} \u2192 {fmt_ts(window[1])}; move the timeline: window B follows the cursor",
+                title="window diff",
+                timeout=5,
+            )
+        if self.center_view != "diff":
+            self._switch_center("diff")
+        self.query_one("#view-diff").focus()
+        self.refresh_all()
+
+    def action_clear_diff(self) -> None:
+        self.diff_base = None
+        self._diff_cache = None
+        self.refresh_all()
+
+    def _refresh_diff(self) -> None:
+        s = self.session
+        table = self.query_one("#view-diff", VirtualTable)
+        if self.diff_base is None or s.view is None:
+            table.set_data(0, lambda i: [], notify=False)
+            self.query_one("#center-panel").border_title = "WINDOW DIFF \u00b7 press d to set baseline A"
+            return
+        b = s.timeline.window()
+        key = (id(s.view), self.diff_base, b)
+        if self._diff_cache is None or self._diff_cache[0] != key:
+            self._diff_cache = (key, diff_windows(s.view, self.diff_base, b))
+        d = self._diff_cache[1]
+        rows = d.rows
+        styles = {"NEW HOST": theme.S_CYAN, "NEW LINK": theme.S_CYAN, "NEW SERVICE": theme.S_AMBER, "GONE HOST": theme.S_DIM,
+                  "GONE LINK": theme.S_DIM, "GONE SERVICE": theme.S_DIM, "MORE": theme.S_AMBER, "LESS": theme.S_GREEN}
+
+        def row(i: int) -> list:
+            r = rows[i]
+            return [Text(r.change, style=styles.get(r.change, theme.S_TEXT)), clean(r.item, 80), r.a, r.b, Text(clean(r.detail, 120), style=theme.S_DIM)]
+
+        table.set_data(len(rows), row, lambda i: (rows[i].change, rows[i].item), keep_key=table.current_key(), notify=False)
+        a = self.diff_base
+        title = (
+            f"WINDOW DIFF \u00b7 A {fmt_ts(a[0])}\u2192{fmt_ts(a[1])} ({d.a_packets:,} pkts) vs "
+            f"B {fmt_ts(b[0])}\u2192{fmt_ts(b[1])} ({d.b_packets:,} pkts)"
+        )
+        if d.services_truncated:
+            title += " \u00b7 services sampled"
+        self.query_one("#center-panel").border_title = title
+
+    def action_add_mark(self) -> None:
+        if not self._has_timeline():
+            return
+        t = self.session.timeline.cursor
+        default = f"mark at T{fmt_rel(t - self.session.capture.index.t0)}"
+
+        def done(label: str | None) -> None:
+            if not label:
+                return
+            try:
+                self.session.add_mark(t, label)
+            except StorageError as exc:
+                self.app.notify(str(exc), severity="error")
+                return
+            self._rebuild_event_markers()
+            self.app.notify(f"marked {fmt_ts(t, True)}: {label}", timeout=3)
+            self.refresh_all()
+
+        self.app.push_screen(PromptScreen("TIMELINE MARK", f"Label for {fmt_ts(t, True)} (analyst interpretation):", default, 120), done)
+
+    def action_mark_step(self, direction: int) -> None:
+        if not self._has_timeline():
+            return
+        self.timeline_pause()
+        tl = self.session.timeline
+        times = sorted(self.mark_times)
+        moved = tl.to_next(times) if direction > 0 else tl.to_prev(times)
+        if not moved:
+            self.app.notify("no further timeline marks (k adds one)", timeout=2)
+        self.refresh_all()
 
     # -- triage --------------------------------------------------------------------------
     def _selected_finding(self):
