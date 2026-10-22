@@ -176,6 +176,8 @@ def render_html(report: dict[str, Any]) -> str:
                     ("first event (UTC)", f["first_time_utc"]),
                     ("last event (UTC)", f["last_time_utc"]),
                     ("confidence", f"{f['confidence']} - {f['confidence_reason']}"),
+                    ("analyst triage", f"{f.get('analyst_status', 'new')}" + (f" - {f['analyst_status_reason']}" if f.get("analyst_status_reason") else "")),
+                    ("suppressed", f"yes - {f['suppressed_by']['reason']}" if f.get("suppressed_by") else "no"),
                     ("supporting frames", f"{f['supporting_frame_count']}: {frames}{more}"),
                     ("rule", f["rule_description"]),
                 ]
@@ -194,6 +196,12 @@ def render_html(report: dict[str, Any]) -> str:
         )
     else:
         out.append('<p class="meta">No analyst notes recorded.</p>')
+    if ai.get("suppression_rules"):
+        out.append("<h3>Suppression rules</h3>")
+        out.append(_table(["created (UTC)", "rule", "host", "reason"], [[x["created_at_utc"], x["rule"], x["host"] or "(any host)", x["reason"]] for x in ai["suppression_rules"]]))
+    if ai.get("timeline_marks"):
+        out.append("<h3>Timeline marks</h3>")
+        out.append(_table(["capture time (UTC)", "label"], [[m["time_utc"], m["label"]] for m in ai["timeline_marks"]]))
     out.append("<h3>Bookmarks</h3>")
     out.append(_table(["created (UTC)", "kind", "reference", "label"], [[b["created_at_utc"], b["kind"], b["ref"], b["label"]] for b in ai["bookmarks"]]))
     if facts and facts["timeline_events"]:

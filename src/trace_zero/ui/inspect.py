@@ -441,6 +441,13 @@ def finding(session: Session, f: Finding) -> Group:
     doc.section("POSSIBLE ANOMALY", "heuristic output — not proof of malicious activity", theme.S_AMBER)
     doc.line(Text(f.title, style=Style(color=theme.TEXT, bold=True)))
     doc.kv("severity", f.severity, theme.SEVERITY_STYLE[f.severity])
+    status = session.triage().get(f.id)
+    sup = session.suppression_for(f)
+    doc.kv("triage", Text(status[0].upper() if status else "NEW (not triaged)", style=theme.S_AMBER))
+    if status and status[1]:
+        doc.kv("reason", Text(status[1], style=theme.S_AMBER))
+    if sup is not None:
+        doc.kv("suppressed", Text(f"{sup.rule} {sup.host or '(any host)'}: {sup.reason}", style=theme.S_AMBER))
     doc.kv("rule", f"{f.rule}  {RULES[f.rule].name}")
     doc.kv("confidence", f.confidence)
     doc.line(f.confidence_reason, theme.S_DIM)
@@ -457,6 +464,7 @@ def finding(session: Session, f: Finding) -> Group:
     doc.section("METRICS", "computed")
     for k, v in f.metrics.items():
         doc.kv(k, v if not isinstance(v, list) else ", ".join(map(str, v[:10])))
+    doc.dim("T: set triage status   z: suppress similar findings")
     doc.section("SUPPORTING FRAMES", f"{f.frame_count:,} total — enter: show as packet list")
     frames = f.frames[:60]
     doc.line(" ".join(f"#{n}" for n in frames) + (" …" if f.frame_count > len(frames) else ""), theme.S_DIM)

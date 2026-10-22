@@ -25,7 +25,7 @@ from trace_zero.analysis.index import H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS
 from trace_zero.analysis.timeline import WindowMode
 from trace_zero.export import export_all
 from trace_zero.export.report import slug
-from trace_zero.models import fmt_bytes, fmt_duration, fmt_ts
+from trace_zero.models import fmt_bytes, fmt_duration, fmt_rel, fmt_ts
 from trace_zero.parsing.reader import CaptureError, ParseCancelled, read_frame_bytes, validate_capture_path
 from trace_zero.parsing.scapy_bridge import dissect_frame
 from trace_zero.sanitize import clean
@@ -34,6 +34,7 @@ from trace_zero.storage import StorageError
 from trace_zero.ui import inspect, theme
 from trace_zero.ui.mapgeo import MapEdge, MapNode
 from trace_zero.ui.screens.dialogs import (
+    ChoiceScreen,
     ConfirmScreen,
     FilterScreen,
     HelpScreen,
@@ -57,7 +58,7 @@ SYNC_FILTER_LIMIT = 50_000
 HOST_COLS = [Col("HOST"), Col("PKTS", 7, "right"), Col("BYTES", 8, "right")]
 PEER_COLS = [Col("", 2), Col("PEER / LINK"), Col("PKTS →/←", 13, "right"), Col("BYTES", 9, "right"), Col("PROTO", 12), Col("BEFORE CUR", 10, "right")]
 PACKET_COLS = [Col("NO", 7, "right"), Col("TIME UTC", 12), Col("SOURCE", 15), Col("DESTINATION", 15), Col("PROTO", 6), Col("LEN", 5, "right"), Col("INFO", min_width=12)]
-FINDING_COLS = [Col("SEV", 6), Col("RULE", 4), Col("FIRST UTC", 12), Col("CONF", 4), Col("FINDING", min_width=16), Col("HOSTS", 20)]
+FINDING_COLS = [Col("SEV", 6), Col("RULE", 4), Col("TRIAGE", 6), Col("FIRST UTC", 12), Col("CONF", 4), Col("FINDING", min_width=16), Col("HOSTS", 18)]
 JOURNAL_COLS = [Col("WHEN (UTC)", 19), Col("TYPE", 8), Col("TARGET", 24), Col("DETAIL", min_width=10)]
 FLOW_COLS = [Col("STATE", 10), Col("PROTO", 6), Col("CLIENT / FIRST SENDER", min_width=14), Col("SERVER", min_width=14), Col("PKTS →/←", 11, "right"), Col("BYTES", 9, "right"), Col("DUR", 9, "right"), Col("APP", 5)]
 
@@ -66,7 +67,7 @@ FLOW_SORTS = ["time", "bytes", "packets", "state"]
 VIEW_FOCUS = {"map": "#peers-table", "flows": "#view-flows", "packets": "#view-packets", "findings": "#view-findings", "journal": "#view-journal"}
 PACKET_SORTS = ["time", "no", "src", "dst", "proto", "len"]
 HOST_SORTS = ["bytes", "pkts", "address"]
-FINDING_SORTS = ["severity", "time", "rule"]
+FINDING_SORTS = ["severity", "time", "rule", "status"]
 
 
 def _splash() -> Text:
@@ -117,6 +118,9 @@ class MainScreen(Screen):
         Binding("S,shift+s", "sort_reverse", "reverse sort"),
         Binding("e", "export", "export"),
         Binding("X,shift+x", "export_pcap", "export packets"),
+        Binding("T,shift+t", "triage", "triage finding"),
+        Binding("z", "suppress", "suppress rule"),
+        Binding("Z,shift+z", "toggle_suppressed", "show suppressed"),
         Binding("r", "rename", "rename"),
         Binding("ctrl+n", "new_investigation", "new investigation"),
         Binding("l", "investigations", "investigations"),
@@ -141,6 +145,7 @@ class MainScreen(Screen):
         self.host_sort = ("bytes", False)
         self.finding_sort = ("severity", False)
         self.flow_sort = ("time", False)
+        self.show_suppressed = False
         self.flow_rows: list = []
         self.finding_rows: list = []
         self.journal_rows: list[tuple] = []
@@ -148,6 +153,8 @@ class MainScreen(Screen):
         self.bookmarked: set[tuple[str, str]] = set()
         self.sig_times: list[float] = []
         self.event_labels: dict[float, str] = {}
+        self.finding_times: list[float] = []
+        self.mark_times: list[float] = []
         self.loading: Worker | None = None
         self.load_status = ""
         self.busy = ""
@@ -316,13 +323,7 @@ class MainScreen(Screen):
         self.show_raw = False
         self.history.clear()
         idx = loaded.index
-        self.sig_times = self.session.significant_times()
-        labels: dict[float, list[str]] = {}
-        for e in idx.events:
-            labels.setdefault(e.ts, []).append(e.label)
-        for f in loaded.findings:
-            labels.setdefault(f.first_ts, []).append(f"possible anomaly: {f.title}")
-        self.event_labels = {t: "; ".join(v[:2]) + (f" (+{len(v) - 2})" if len(v) > 2 else "") for t, v in labels.items()}
+        self._rebuild_event_markers()
         self._reload_bookmarks()
         self._restore_header()
         r = loaded.result
@@ -338,6 +339,26 @@ class MainScreen(Screen):
             self.app.notify(f"{msg}\nimport truncated: {r.stop_reason}", title=r.file.name, severity="warning", timeout=8)
         else:
             self.app.notify(msg, title=r.file.name)
+
+    def _rebuild_event_markers(self) -> None:
+        """Significant times for < / >: first observations, visible findings and named marks."""
+        s = self.session
+        if s.capture is None:
+            self.sig_times, self.event_labels, self.finding_times, self.mark_times = [], {}, [], []
+            return
+        labels: dict[float, list[str]] = {}
+        for e in s.capture.index.events:
+            labels.setdefault(e.ts, []).append(e.label)
+        visible = [f for f, _status, _sup in s.visible_findings()]
+        for f in visible:
+            labels.setdefault(f.first_ts, []).append(f"possible anomaly: {f.title}")
+        marks = s.marks()
+        for m in marks:
+            labels.setdefault(m.ts, []).insert(0, f"MARK {m.label}")
+        self.sig_times = sorted(labels)
+        self.event_labels = {t: "; ".join(v[:2]) + (f" (+{len(v) - 2})" if len(v) > 2 else "") for t, v in labels.items()}
+        self.finding_times = [f.first_ts for f in visible]
+        self.mark_times = [m.ts for m in marks]
 
     # ------------------------------------------------------------------ refresh
     def refresh_all(self) -> None:
@@ -405,7 +426,7 @@ class MainScreen(Screen):
         elif fid == "hosts-table":
             keys += [("enter", "map"), ("m", "mark"), ("a", "note"), ("s", f"sort:{self.host_sort[0]}")]
         elif fid == "view-findings":
-            keys += [("enter", "evidence"), ("m", "mark"), ("a", "note"), ("s", f"sort:{self.finding_sort[0]}")]
+            keys += [("enter", "evidence"), ("T", "triage"), ("z", "suppress"), ("Z", "show suppressed"), ("a", "note"), ("s", f"sort:{self.finding_sort[0]}")]
         elif fid == "view-journal":
             keys += [("enter", "go to"), ("del", "delete")]
         elif fid == "view-flows":
@@ -627,40 +648,51 @@ class MainScreen(Screen):
     def _refresh_findings(self) -> None:
         s = self.session
         table = self.query_one("#view-findings", VirtualTable)
-        findings = list(s.capture.findings)
+        entries = s.visible_findings(include_suppressed=self.show_suppressed)
+        hidden = len(s.capture.findings) - len(s.visible_findings(include_suppressed=False)) if not self.show_suppressed else 0
         key, rev = self.finding_sort
+        status_order = {"escalated": 0, None: 1, "open": 1, "benign": 2}
         if key == "severity":
-            findings.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.first_ts))
+            entries.sort(key=lambda e: (SEVERITY_ORDER[e[0].severity], e[0].first_ts))
         elif key == "time":
-            findings.sort(key=lambda f: (f.first_ts, SEVERITY_ORDER[f.severity]))
+            entries.sort(key=lambda e: (e[0].first_ts, SEVERITY_ORDER[e[0].severity]))
+        elif key == "status":
+            entries.sort(key=lambda e: (status_order[e[1][0] if e[1] else None], SEVERITY_ORDER[e[0].severity], e[0].first_ts))
         else:
-            findings.sort(key=lambda f: (f.rule, f.first_ts))
+            entries.sort(key=lambda e: (e[0].rule, e[0].first_ts))
         if rev:
-            findings.reverse()
-        self.finding_rows = findings
+            entries.reverse()
+        self.finding_rows = [e[0] for e in entries]
         cursor = s.timeline.cursor
+        status_style = {"escalated": theme.S_RED, "benign": theme.S_GREEN, "open": theme.S_TEXT}
 
         def row(i: int) -> list:
-            f = findings[i]
+            f, status, sup = entries[i]
             mark = ("finding", f.id) in self.bookmarked
+            label = "SUPPR" if sup is not None else (status[0].upper()[:5] if status else "new")
             return [
                 Text(f.severity, style=theme.SEVERITY_STYLE[f.severity]),
                 f.rule[3:],
+                Text(label, style=theme.S_FAINT if sup is not None else status_style.get(status[0] if status else "", theme.S_DIM)),
                 fmt_ts(f.first_ts),
                 {"MEDIUM": "MED"}.get(f.confidence, f.confidence),
-                Text(("■ " if mark else "") + f.title, style=theme.S_AMBER if mark else theme.S_TEXT),
-                ", ".join(f.hosts[:3]) + (" …" if len(f.hosts) > 3 else ""),
+                Text(("\u25a0 " if mark else "") + f.title, style=theme.S_AMBER if mark else theme.S_TEXT),
+                ", ".join(f.hosts[:3]) + (" \u2026" if len(f.hosts) > 3 else ""),
             ]
 
         def style(i: int):
-            return theme.S_FAINT if findings[i].first_ts > cursor else None
+            f, status, sup = entries[i]
+            return theme.S_FAINT if (f.first_ts > cursor or sup is not None or (status and status[0] == "benign")) else None
 
         sel = s.selection
         keep = sel.ref if sel is not None and sel.kind == "finding" else table.current_key()
-        index = {f.id: i for i, f in enumerate(findings)}
-        table.set_data(len(findings), row, lambda i: findings[i].id, keep_key=keep, locate=index.get, style_fn=style, notify=False)
-        observed = sum(1 for f in findings if f.first_ts <= cursor)
-        self.query_one("#center-panel").border_title = f"FINDINGS · {len(findings)} possible anomalies · {observed} observed by cursor"
+        index = {e[0].id: i for i, e in enumerate(entries)}
+        table.set_data(len(entries), row, lambda i: entries[i][0].id, keep_key=keep, locate=index.get, style_fn=style, notify=False)
+        observed = sum(1 for e in entries if e[0].first_ts <= cursor)
+        title = f"FINDINGS \u00b7 {len(entries)} possible anomalies \u00b7 {observed} observed by cursor"
+        if hidden:
+            title += f" \u00b7 {hidden} suppressed (Z shows)"
+        self.query_one("#center-panel").border_title = title
 
     # journal -----------------------------------------------------------------------
     def _refresh_journal(self) -> None:
@@ -674,13 +706,18 @@ class MainScreen(Screen):
             rows.append((n.created_at, "NOTE", f"{n.target_kind} {n.target_ref}".strip(), n.body.replace("\n", " "), ("note", n.id, n.target_kind, n.target_ref)))
         for e in store.events(inv.id, 300):
             rows.append((e.at, "LOG", e.kind, e.message, ("event", e.id, None, None)))
+        for sup in store.suppressions(inv.id):
+            rows.append((sup.created_at, "SUPPRESS", f"{sup.rule} {sup.host or '(any host)'}", sup.reason, ("suppression", sup.id, None, None)))
+        if s.capture is not None:
+            for m in s.marks():
+                rows.append((m.created_at, "MARK", f"T{fmt_rel(m.ts - s.capture.index.t0)}", m.label, ("mark", m.id, "mark", str(m.ts))))
         rows.sort(key=lambda r: (r[0], r[4][0], r[4][1]))
         self.journal_rows = rows
         table = self.query_one("#view-journal", VirtualTable)
 
         def row(i: int) -> list:
             at, typ, target, detail, _ = rows[i]
-            style = {"BOOKMARK": theme.S_CYAN, "NOTE": theme.S_AMBER, "LOG": theme.S_DIM}[typ]
+            style = {"BOOKMARK": theme.S_CYAN, "NOTE": theme.S_AMBER, "LOG": theme.S_DIM, "SUPPRESS": theme.S_AMBER, "MARK": theme.S_GREEN}[typ]
             return [Text(fmt_ts(at, True)[:19], style=theme.S_DIM), Text(typ, style=style), clean(target, 80), Text(clean(detail, 300), style=theme.S_AMBER if typ == "NOTE" else theme.S_TEXT)]
 
         table.set_data(len(rows), row, lambda i: rows[i][4][:2], keep_key=table.current_key(), notify=False)
@@ -740,7 +777,8 @@ class MainScreen(Screen):
         snap = TimelineSnapshot(
             timeline=tl,
             counts=counts,
-            finding_times=[f.first_ts for f in s.capture.findings],
+            finding_times=self.finding_times,
+            mark_times=self.mark_times,
             window_packets=stats.packets if stats else 0,
             window_bytes=stats.bytes if stats else 0,
             event_label=label,
@@ -908,6 +946,11 @@ class MainScreen(Screen):
 
     def goto(self, kind: str, ref: str) -> None:
         s = self.session
+        if kind == "mark":
+            self.timeline_pause()
+            s.timeline.set_cursor(float(ref))
+            self.refresh_all()
+            return
         if kind == "packet":
             p = s.capture.index.packet(int(ref))
             if p is None:
@@ -1437,6 +1480,77 @@ class MainScreen(Screen):
         if self.center_view == "journal":
             self._refresh_journal()
 
+    # -- triage --------------------------------------------------------------------------
+    def _selected_finding(self):
+        sel = self.session.selection
+        if self.session.capture is None or sel is None or sel.kind != "finding":
+            self.app.notify("select a finding first (f)", severity="warning")
+            return None
+        return self.session.capture.finding(sel.ref)
+
+    def action_triage(self) -> None:
+        f = self._selected_finding()
+        if f is None:
+            return
+        options = [
+            ("open", "o", "OPEN \u2014 still being reviewed"),
+            ("benign", "b", "BENIGN \u2014 explained, no further action"),
+            ("escalated", "e", "ESCALATED \u2014 needs follow-up / incident"),
+        ]
+
+        def chosen(status: str | None) -> None:
+            if status is None:
+                return
+
+            def reasoned(reason: str | None) -> None:
+                if reason is None:
+                    return
+                try:
+                    self.session.set_status(f.id, status, reason)
+                except StorageError as exc:
+                    self.app.notify(str(exc), severity="error")
+                    return
+                self.app.notify(f"{f.rule} marked {status}", timeout=2)
+                self.refresh_all()
+
+            self.app.push_screen(PromptScreen("TRIAGE REASON", f"Why is this {status}? (optional, recorded as analyst interpretation)", "", 500, allow_empty=True), reasoned)
+
+        self.app.push_screen(ChoiceScreen("TRIAGE", clean(f.title, 120), options), chosen)
+
+    def action_suppress(self) -> None:
+        f = self._selected_finding()
+        if f is None:
+            return
+        options = [("", "a", f"{f.rule} for any host \u2014 '{f.rule_name}'")]
+        options += [(h, str(i + 1), f"{f.rule} only when it involves {h}") for i, h in enumerate(f.hosts[:8])]
+
+        def chosen(host: str | None) -> None:
+            if host is None:
+                return
+
+            def reasoned(reason: str | None) -> None:
+                if not reason:
+                    return
+                try:
+                    self.session.store.add_suppression(self.session.investigation.id, f.rule, host, reason)
+                except StorageError as exc:
+                    self.app.notify(str(exc), severity="error")
+                    return
+                self.app.notify(f"suppressed {f.rule} {host or '(any host)'} \u2014 Z shows suppressed findings, journal lists rules", timeout=4)
+                self._rebuild_event_markers()
+                self.refresh_all()
+
+            self.app.push_screen(PromptScreen("SUPPRESSION REASON", "A reason is required; it is exported with the report.", "", 500), reasoned)
+
+        self.app.push_screen(ChoiceScreen("SUPPRESS FINDINGS", "Hide matching findings in this investigation (reversible from the journal).", options), chosen)
+
+    def action_toggle_suppressed(self) -> None:
+        self.show_suppressed = not self.show_suppressed
+        self.app.notify("showing suppressed findings" if self.show_suppressed else "hiding suppressed findings", timeout=2)
+        if self.center_view != "findings":
+            self._switch_center("findings")
+        self.refresh_all()
+
     def action_rename(self) -> None:
         def done(name: str | None) -> None:
             if not name:
@@ -1504,7 +1618,7 @@ class MainScreen(Screen):
         key = table.current_key()
         row = next((r for r in self.journal_rows if r[4][:2] == key), None)
         if row is None or row[4][0] == "event":
-            self.app.notify("only bookmarks and notes can be deleted", timeout=2)
+            self.app.notify("only bookmarks, notes, marks and suppressions can be deleted", timeout=2)
             return
         typ, item_id = row[4][0], row[4][1]
 
@@ -1514,8 +1628,13 @@ class MainScreen(Screen):
             store, inv = self.session.store, self.session.investigation
             if typ == "bookmark":
                 store.delete_bookmark(inv.id, item_id)
+            elif typ == "suppression":
+                store.delete_suppression(inv.id, item_id)
+            elif typ == "mark":
+                store.delete_mark(inv.id, item_id)
             else:
                 store.delete_note(inv.id, item_id)
+            self._rebuild_event_markers()
             self._reload_bookmarks()
             self.refresh_all()
             self._refresh_journal()

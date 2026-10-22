@@ -218,6 +218,47 @@ class Session:
         labels += [f"possible anomaly: {f.title}" for f in self.capture.findings if f.first_ts == t]
         return "; ".join(labels[:3]) if labels else None
 
+    # -- finding triage ---------------------------------------------------------------------
+    def triage(self) -> dict[str, tuple[str, str]]:
+        if self.capture is None:
+            return {}
+        return self.store.finding_statuses(self.investigation.id, self.sha)
+
+    def set_status(self, finding_id: str, status: str, reason: str = "") -> None:
+        self.store.set_finding_status(self.investigation.id, self.sha, finding_id, status, reason)
+
+    def suppressions(self):
+        return self.store.suppressions(self.investigation.id)
+
+    def suppression_for(self, finding: Finding, sups=None):
+        for sup in sups if sups is not None else self.suppressions():
+            if sup.matches(finding.rule, finding.hosts):
+                return sup
+        return None
+
+    def visible_findings(self, include_suppressed: bool = False) -> list[tuple[Finding, tuple[str, str] | None, object]]:
+        """(finding, (status, reason) or None, matching suppression or None)."""
+        if self.capture is None:
+            return []
+        statuses = self.triage()
+        sups = self.suppressions()
+        out = []
+        for f in self.capture.findings:
+            sup = self.suppression_for(f, sups)
+            if sup is not None and not include_suppressed:
+                continue
+            out.append((f, statuses.get(f.id), sup))
+        return out
+
+    # -- timeline marks -------------------------------------------------------------------
+    def marks(self):
+        if self.capture is None:
+            return []
+        return self.store.marks(self.investigation.id, self.sha)
+
+    def add_mark(self, ts: float, label: str) -> int:
+        return self.store.add_mark(self.investigation.id, self.sha, ts, label)
+
     # -- analyst data ------------------------------------------------------------
     def toggle_bookmark(self, sel: Selection, label: str = "") -> bool:
         return self.store.toggle_bookmark(self.investigation.id, self.sha, sel.kind, sel.ref, label)

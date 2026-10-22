@@ -21,6 +21,7 @@ class TimelineSnapshot:
     timeline: Timeline
     counts: list[int]
     finding_times: list[float]
+    mark_times: list[float]
     window_packets: int
     window_bytes: int
     event_label: str | None
@@ -93,6 +94,10 @@ class TimelinePanel(Widget, can_focus=True):
             c = col_of(ft)
             axis[c] = "◆"
             axis_style[c] = theme.S_AMBER
+        for mt in snap.mark_times:
+            c = col_of(mt)
+            axis[c] = "\u2691"
+            axis_style[c] = theme.S_GREEN
         axis[cur_col] = "▲"
         axis_style[cur_col] = theme.S_CYAN_B
         at = Text(no_wrap=True, end="")

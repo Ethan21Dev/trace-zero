@@ -150,8 +150,27 @@ def build_report(session) -> dict[str, Any]:
     for n in notes:
         if n.target_kind == "finding":
             finding_notes.setdefault(n.target_ref, []).append(n.body)
-    report["heuristic_findings"]["findings"] = [
-        f.to_dict() | {"analyst_notes": finding_notes.get(f.id, [])} for f in loaded.findings
+    statuses = session.triage()
+    sups = session.suppressions()
+    findings_out = []
+    for f in loaded.findings:
+        status = statuses.get(f.id)
+        sup = session.suppression_for(f, sups)
+        findings_out.append(
+            f.to_dict()
+            | {
+                "analyst_notes": finding_notes.get(f.id, []),
+                "analyst_status": status[0] if status else "new",
+                "analyst_status_reason": status[1] if status else "",
+                "suppressed_by": {"rule": sup.rule, "host": sup.host, "reason": sup.reason} if sup else None,
+            }
+        )
+    report["heuristic_findings"]["findings"] = findings_out
+    report["analyst_interpretations"]["suppression_rules"] = [
+        {"rule": x.rule, "host": x.host or None, "reason": x.reason, "created_at_utc": _iso(x.created_at)} for x in sups
+    ]
+    report["analyst_interpretations"]["timeline_marks"] = [
+        {"time_utc": fmt_ts(m.ts, True), "label": m.label, "created_at_utc": _iso(m.created_at)} for m in session.marks()
     ]
     if session.filter is not None:
         report["view_at_export"] = {"filter": session.filter.display}

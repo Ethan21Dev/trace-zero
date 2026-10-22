@@ -215,16 +215,62 @@ class FilterScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ChoiceScreen(ModalScreen[str | None]):
+    """Pick one option with up/down + enter, or its hotkey."""
+
+    DEFAULT_CSS = _css("ChoiceScreen") + """
+    ChoiceScreen > #frame { width: 70; }
+    ChoiceScreen VirtualTable { height: auto; max-height: 14; margin-top: 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "cancel")]
+
+    def __init__(self, title: str, label: str, options: list[tuple[str, str, str]]) -> None:
+        """options: (value, hotkey, description)."""
+        super().__init__()
+        self.title_text = title
+        self.label = label
+        self.options = options
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="frame") as frame:
+            frame.border_title = self.title_text
+            yield Static(self.label, classes="hint", markup=False)
+            yield VirtualTable([Col("KEY", 5), Col("CHOICE")], id="choices")
+            yield Static("enter / hotkey choose  \u2502  esc cancel", classes="hint")
+
+    def on_mount(self) -> None:
+        table = self.query_one(VirtualTable)
+        opts = self.options
+        table.set_data(len(opts), lambda i: [Text(opts[i][1], style=theme.S_CYAN), opts[i][2]], lambda i: opts[i][0], notify=False)
+        table.styles.height = len(opts) + 1
+        table.focus()
+
+    def on_key(self, event) -> None:
+        for value, hotkey, _desc in self.options:
+            if event.character and event.character == hotkey:
+                event.stop()
+                self.dismiss(value)
+                return
+
+    @on(VirtualTable.Activated)
+    def activated(self, event: VirtualTable.Activated) -> None:
+        self.dismiss(event.key)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class PromptScreen(ModalScreen[str | None]):
     DEFAULT_CSS = _css("PromptScreen")
     BINDINGS = [Binding("escape", "cancel", "cancel")]
 
-    def __init__(self, title: str, label: str, initial: str = "", max_length: int = 0) -> None:
+    def __init__(self, title: str, label: str, initial: str = "", max_length: int = 0, allow_empty: bool = False) -> None:
         super().__init__()
         self.title_text = title
         self.label = label
         self.initial = initial
         self.max_length = max_length
+        self.allow_empty = allow_empty
 
     def compose(self) -> ComposeResult:
         with Vertical(id="frame") as frame:
@@ -238,7 +284,7 @@ class PromptScreen(ModalScreen[str | None]):
 
     @on(Input.Submitted, "#value")
     def submitted(self, event: Input.Submitted) -> None:
-        if event.value.strip():
+        if event.value.strip() or self.allow_empty:
             self.dismiss(event.value.strip())
 
     def action_cancel(self) -> None:

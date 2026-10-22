@@ -493,3 +493,44 @@ async def test_export_packets_key(tmp_path, sample_pcap):
         exported = read_capture(target).packets
         assert exported and all(p.app == "DNS" for p in exported)
         assert any(e.kind == "export" and "Wireshark filter: dns" in e.message for e in s.store.events(s.investigation.id))
+
+
+async def test_triage_and_suppression_keys(tmp_path, sample_pcap):
+    from trace_zero.ui.screens.dialogs import ChoiceScreen
+
+    app, s = make_app(tmp_path, sample_pcap)
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        main = screen(app)
+        await pilot.press("f")
+        await pilot.press("down")
+        fid = s.selection.ref
+        finding = s.capture.finding(fid)
+        await pilot.press("T")
+        assert isinstance(app.screen, ChoiceScreen)
+        await pilot.press("b")  # hotkey: benign
+        assert isinstance(app.screen, PromptScreen)
+        app.screen.query_one(Input).value = "scheduled backup"
+        await pilot.press("enter")
+        assert s.triage()[fid] == ("benign", "scheduled backup")
+        total = main.query_one("#view-findings", VirtualTable).count
+        await pilot.press("z")
+        await pilot.press("a")  # suppress rule for any host
+        app.screen.query_one(Input).value = "known noisy in this network"
+        await pilot.press("enter")
+        await pilot.pause()
+        same_rule = sum(1 for f in s.capture.findings if f.rule == finding.rule)
+        assert main.query_one("#view-findings", VirtualTable).count == total - same_rule
+        assert all(f.rule != finding.rule for f in main.finding_rows)
+        # Suppressed findings no longer mark the timeline.
+        assert sorted(main.finding_times) == sorted(f.first_ts for f in s.capture.findings if f.rule != finding.rule)
+        await pilot.press("Z")
+        assert main.query_one("#view-findings", VirtualTable).count == total
+        await pilot.press("b")
+        kinds = {r[1] for r in main.journal_rows}
+        assert "SUPPRESS" in kinds
+        from trace_zero.export import build_report
+
+        rep = build_report(s)
+        exported = {f["id"]: f for f in rep["heuristic_findings"]["findings"]}
+        assert exported[fid]["analyst_status"] == "benign" and exported[fid]["suppressed_by"]["reason"] == "known noisy in this network"
