@@ -57,6 +57,7 @@ def _setup_logging() -> None:
 
 
 def _headless(args: argparse.Namespace, cfg: Config) -> int:
+    from trace_zero import custody
     from trace_zero.export import build_report, write_html, write_json
     from trace_zero.parsing import CaptureError
     from trace_zero.session import Session, load_captures
@@ -111,13 +112,15 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
     try:
         if args.pcap:
             count, _expr, _notes = session.export_packets(args.pcap)
-            print(f"pcapng         {args.pcap}  ({count:,} packets)")
+            print(f"pcapng         {args.pcap}  ({count:,} packets)  sha256 {custody.read_digest(args.pcap)}")
         if args.json or args.html:
             report = build_report(session)
             if args.json:
-                print(f"json           {write_json(report, args.json)}")
+                write_json(report, args.json)
+                print(f"json           {args.json}  sha256 {session.record_export(args.json, 'JSON summary')}")
             if args.html:
-                print(f"html           {write_html(report, args.html)}")
+                write_html(report, args.html)
+                print(f"html           {args.html}  sha256 {session.record_export(args.html, 'HTML report')}")
     except (OSError, CaptureError) as exc:
         print(f"error: cannot write export: {exc}", file=sys.stderr)
         return 1

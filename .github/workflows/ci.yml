@@ -51,3 +51,17 @@ jobs:
             --json "$RUNNER_TEMP/report.json" \
             --html "$RUNNER_TEMP/report.html"
           python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['capture']['packets'] > 0 and d['heuristic_findings']['findings']" "$RUNNER_TEMP/report.json"
+
+  package:
+    name: package builds cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel and check metadata
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*

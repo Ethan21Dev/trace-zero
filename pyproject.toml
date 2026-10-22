@@ -1,21 +1,21 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "trace-zero"
-version = "0.1.0"
+dynamic = ["version"]
 description = "TRACE//ZERO - keyboard-driven terminal network forensics for PCAP/PCAPNG captures."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "TRACE//ZERO contributors" }]
 keywords = ["pcap", "pcapng", "forensics", "network", "tui", "textual", "scapy"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console :: Curses",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -37,8 +37,16 @@ dev = [
     "maxminddb>=2.0",  # reference reader, cross-checks the built-in MMDB reader in tests
 ]
 
+[project.urls]
+Homepage = "https://github.com/Ethan21Dev/trace-zero"
+Documentation = "https://github.com/Ethan21Dev/trace-zero/tree/main/docs"
+Issues = "https://github.com/Ethan21Dev/trace-zero/issues"
+
 [project.scripts]
 trace-zero = "trace_zero.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "trace_zero.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

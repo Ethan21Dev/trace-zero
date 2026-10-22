@@ -81,8 +81,10 @@ def test_cli_verify_exit_codes(tmp_path, sample_pcap, capsys):
     cap = tmp_path / "evidence.pcap"
     shutil.copy(sample_pcap, cap)
     db = str(tmp_path / "v.db")
-    assert main([str(cap), "--headless", "--db", db, "-i", "case-1"]) == 0
-    capsys.readouterr()
+    report = tmp_path / "r.json"
+    assert main([str(cap), "--headless", "--db", db, "-i", "case-1", "--json", str(report)]) == 0
+    assert hashlib.sha256(report.read_bytes()).hexdigest() in capsys.readouterr().out
+    assert (tmp_path / "r.json.sha256").exists()
     assert main(["--verify", "--db", db, "-i", "case-1"]) == 0
     assert "MATCH" in capsys.readouterr().out
     cap.unlink()
