@@ -8,11 +8,11 @@ tool with capture permission (see *Live capture permissions* below).
 Recommended terminal size: **160 x 45** or larger for the three-panel workspace. Between
 60 x 16 and 130 columns the interface switches to one panel at a time with tabs.
 
-## Standalone executable or PyPI
+## Standalone executable or release wheel
 
-Tagged releases provide single-file executables (Linux x86-64, Windows x86-64, macOS arm64)
-with a `SHA256SUMS` file, and the `trace-zero` package on PyPI (`pipx install trace-zero`).
-Neither needs a source checkout. The sections below install from source.
+Releases on GitHub (https://github.com/Ethan21Dev/trace-zero/releases) provide single-file
+executables (Linux x86-64, Windows x86-64, macOS arm64) and the Python wheel, with a
+`SHA256SUMS` file. Neither needs a source checkout. The sections below install from source.
 
 ## Linux
 

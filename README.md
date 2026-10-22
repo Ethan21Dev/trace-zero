@@ -65,13 +65,16 @@ sha256sum -c SHA256SUMS --ignore-missing
 chmod +x trace-zero-*-linux-x86_64 && ./trace-zero-*-linux-x86_64 --version
 ```
 
-### From PyPI
+### From a release wheel
 
-Releases are published to PyPI as `trace-zero` with trusted publishing:
+Each GitHub release also carries the Python package (`trace_zero-X.Y.Z-py3-none-any.whl`):
 
 ```bash
-pipx install trace-zero        # or: python -m pip install trace-zero
+pipx install ./trace_zero-0.1.0-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
 ```
+
+It is not on PyPI yet; the release workflow publishes there once PyPI publishing is enabled
+(see *Releasing* below).
 
 ### From source - Linux
 
@@ -362,8 +365,10 @@ The test suite never touches the network: a fixture makes any scapy send/ARP cal
 When `tshark` is installed, Wireshark filter translations are cross-checked against it.
 
 Releasing: bump `__version__` in `src/trace_zero/__init__.py`, tag `vX.Y.Z` and push the tag.
-The release workflow refuses a tag that does not match the version. Publishing to PyPI needs
-a one-time trusted-publisher setup on pypi.org for this repository and a `pypi` environment.
+The release workflow refuses a tag that does not match the version. PyPI publishing is off
+until a one-time setup: register this repository as a trusted publisher for `trace-zero` on
+pypi.org (workflow `release.yml`, environment `pypi`), create the `pypi` environment in the
+repository settings, and set the repository variable `PUBLISH_TO_PYPI` to `true`.
 
 Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Troubleshooting: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

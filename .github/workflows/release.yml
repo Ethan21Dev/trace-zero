@@ -1,8 +1,8 @@
 name: Release
 
 # Push a tag like v0.2.0 (matching trace_zero.__version__) to publish:
-#   * sdist + wheel to PyPI via trusted publishing (no API token stored)
-#   * standalone executables for Linux, Windows and macOS on the GitHub release
+#   * standalone executables for Linux, Windows and macOS, plus sdist + wheel, on the GitHub release
+#   * sdist + wheel to PyPI via trusted publishing (no API token stored), once PUBLISH_TO_PYPI is set
 # Run it manually (workflow_dispatch) to build and smoke-test everything
 # without publishing.
 
@@ -94,7 +94,9 @@ jobs:
 
   pypi:
     name: publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/')
+    # Off until the one-time setup is done: register this repository as a trusted publisher on
+    # pypi.org, create a "pypi" environment, then set the repository variable PUBLISH_TO_PYPI=true.
+    if: startsWith(github.ref, 'refs/tags/') && vars.PUBLISH_TO_PYPI == 'true'
     needs: [dist, binaries]
     runs-on: ubuntu-latest
     environment:
