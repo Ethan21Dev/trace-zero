@@ -105,3 +105,39 @@ def test_facade_describes_host(tmp_path):
     assert rows["MAC vendor"].startswith("Example NIC")
     assert rows["MAC type"].startswith("locally administered")
     assert e.ip_facts("10.20.0.11") == ()  # private addresses are never looked up
+
+
+def test_enrichment_flows_into_session_inspector_and_report(tmp_path, sample_pcap):
+    from rich.console import Console
+    import io
+
+    from trace_zero.config import Config
+    from trace_zero.export import build_report
+    from trace_zero.session import Session, load_capture
+    from trace_zero.storage import Store
+    from trace_zero.ui import inspect
+
+    city = write_mmdb(tmp_path / "city.mmdb", CITY, db_type="GeoLite2-City")
+    cfg = Config(db_path=tmp_path / "db", export_dir=tmp_path / "ex", cache_dir=tmp_path / "c", mmdb_paths=(city,))
+    store = Store(cfg.db_path)
+    s = Session(cfg, store, store.create_investigation("geo"))
+    s.attach(load_capture(sample_pcap, cfg))
+    console = Console(width=100, file=io.StringIO(), record=True)
+    console.print(inspect.host(s, "203.0.113.10", s.window_stats()))
+    text = console.export_text()
+    assert "REFERENCE DATA" in text and "Amsterdam" in text
+    rep = build_report(s)
+    assert any(r["value"].startswith("NL") for r in rep["reference_data"]["hosts"]["203.0.113.10"])
+    assert "Amsterdam" not in str(rep["observed_facts"])  # reference data stays out of observed facts
+
+
+def test_config_reference_paths(tmp_path):
+    from trace_zero.config import ConfigError, load_config
+
+    p = tmp_path / "c.toml"
+    p.write_text('[paths]\noui = "~/oui.csv"\ngeoip = ["/a.mmdb", "/b.mmdb"]\n')
+    cfg = load_config(p)
+    assert cfg.oui_path.name == "oui.csv" and [g.name for g in cfg.mmdb_paths] == ["a.mmdb", "b.mmdb"]
+    p.write_text("[paths]\ngeoip = 3\n")
+    with pytest.raises(ConfigError):
+        load_config(p)

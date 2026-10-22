@@ -15,6 +15,7 @@ from pathlib import Path
 
 from trace_zero.analysis.anomaly import Finding, detect
 from trace_zero.cache import CaptureCache
+from trace_zero.enrich import Enrichment
 from trace_zero.analysis.filters import PacketFilter, compile_filter, frames_filter
 from trace_zero.analysis.flows import Flow, build_flows
 from trace_zero.analysis.index import CaptureIndex, CaptureView, WindowStats
@@ -141,6 +142,8 @@ class Session:
         self.view: CaptureView | None = None
         self.timeline: Timeline | None = None
         self.selection: Selection | None = None
+        # Offline reference data (MAC vendors, geolocation/ASN) - optional, user-supplied files.
+        self.enrichment, self.enrichment_problems = Enrichment.from_paths(config.oui_path, list(config.mmdb_paths))
 
     # -- capture lifecycle -------------------------------------------------------
     def attach(self, loaded: LoadedCapture) -> None:

@@ -102,6 +102,7 @@ def build_report(session) -> dict[str, Any]:
     }
     full = idx.view(None, key="").window(idx.t0, idx.t1) if r.packets else None
     hosts = []
+    reference: dict[str, list] = {}
     for ip, m in sorted(idx.hosts.items(), key=lambda kv: -(kv[1].bytes_out + kv[1].bytes_in))[:TOP_N]:
         hosts.append(
             {
@@ -118,8 +119,14 @@ def build_report(session) -> dict[str, Any]:
                 "ttl_values_sent": dict(m.ttls.most_common(5)),
                 "tcp_ports_accepting": sorted(m.ports_accepting),
                 "protocols": dict(m.protocols.most_common()),
+                "dhcp_host_names": [{"name": n, "frame": no} for n, no in m.dhcp_names.items()],
+                "tls_names_observed": [{"name": n, "frame": no} for n, no in m.tls_names.items()],
+                "ja4_sent": dict(m.tls_client_fps.most_common(5)),
             }
         )
+        enrich = getattr(session, "enrichment", None)
+        if enrich is not None and enrich.active:
+            reference[ip] = [{"field": k, "value": v} for k, v in enrich.describe_host(ip, list(m.macs))]
     conversations = []
     for row in (full.pairs() if full else [])[:TOP_N]:
         conversations.append(
@@ -145,6 +152,12 @@ def build_report(session) -> dict[str, Any]:
         "timeline_events": [
             {"time_utc": fmt_ts(e.ts, True), "kind": e.kind, "description": e.label, "frame": e.frame} for e in idx.events[:500]
         ],
+    }
+    enrich = getattr(session, "enrichment", None)
+    report["reference_data"] = {
+        "notice": "From offline databases supplied by the analyst; not derived from the capture.",
+        "sources": enrich.sources() if enrich is not None else [],
+        "hosts": reference,
     }
     finding_notes: dict[str, list[str]] = {}
     for n in notes:

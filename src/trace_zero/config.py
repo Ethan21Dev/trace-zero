@@ -101,6 +101,9 @@ class Config:
     db_path: Path = field(default_factory=lambda: default_data_dir() / "investigations.db")
     export_dir: Path = field(default_factory=lambda: Path.home() / "trace-zero-exports")
     cache_dir: Path = field(default_factory=lambda: default_data_dir() / "cache")
+    # Optional offline reference data (never fetched automatically).
+    oui_path: Path | None = None
+    mmdb_paths: tuple[Path, ...] = ()
 
 
 def _merge_section(obj: Any, data: dict[str, Any], section: str) -> Any:
@@ -143,4 +146,13 @@ def load_config(path: Path | None = None) -> Config:
     db_path = Path(paths["db"]).expanduser() if "db" in paths else cfg.db_path
     export_dir = Path(paths["exports"]).expanduser() if "exports" in paths else cfg.export_dir
     cache_dir = Path(paths["cache"]).expanduser() if "cache" in paths else cfg.cache_dir
-    return Config(limits=limits, anomaly=anomaly, db_path=db_path, export_dir=export_dir, cache_dir=cache_dir)
+    oui_path = Path(paths["oui"]).expanduser() if paths.get("oui") else None
+    geoip = paths.get("geoip", [])
+    if isinstance(geoip, str):
+        geoip = [geoip]
+    if not isinstance(geoip, list) or not all(isinstance(g, str) for g in geoip):
+        raise ConfigError("[paths] geoip must be a path or a list of paths")
+    return Config(
+        limits=limits, anomaly=anomaly, db_path=db_path, export_dir=export_dir, cache_dir=cache_dir,
+        oui_path=oui_path, mmdb_paths=tuple(Path(g).expanduser() for g in geoip),
+    )

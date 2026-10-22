@@ -13,6 +13,7 @@ max_packets = 1000000     # import stops here and the capture is flagged TRUNCAT
 batch_size = 5000         # packets per progress update / cancellation check
 max_raw_bytes = 65535     # cap for the raw-bytes view of one packet
 max_dns_payload = 4096    # larger DNS payloads are not decoded
+cache_max_mb = 2048       # on-disk cache of parsed captures; 0 disables
 
 [anomaly]
 # TZ-R1 repeated failed connection attempts
@@ -43,3 +44,7 @@ max_refs = 500
 [paths]
 # db = "~/.local/share/trace-zero/investigations.db"
 # exports = "~/trace-zero-exports"
+# cache = "~/.local/share/trace-zero/cache"
+# Optional offline reference data (never downloaded by TRACE//ZERO itself):
+# oui = "~/.local/share/trace-zero/oui.csv"          # python scripts/fetch_oui.py
+# geoip = ["~/GeoLite2-City.mmdb", "~/GeoLite2-ASN.mmdb"]

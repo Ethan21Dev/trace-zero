@@ -123,6 +123,13 @@ def overview(session: Session) -> Group:
     doc.section("PROTOCOLS", "observed")
     for proto, n in idx.proto_counts.most_common(12):
         doc.kv(proto, f"{n:,}")
+    enrich = getattr(session, "enrichment", None)
+    if enrich is not None and (enrich.active or session.enrichment_problems):
+        doc.section("REFERENCE DATA", "offline, user-supplied", theme.S_DIM)
+        for src in enrich.sources():
+            doc.dim(clean(src, 300))
+        for problem in session.enrichment_problems:
+            doc.line(Text("! " + clean(problem, 300), style=theme.S_AMBER))
     f = session.capture.findings
     doc.section("POSSIBLE ANOMALIES", "heuristic")
     if not f:
@@ -188,12 +195,25 @@ def host(session: Session, ip: str, stats: WindowStats | None) -> Group:
             doc.kv("JA4 sent", ", ".join(f"{fp} \u00d7{n}" for fp, n in meta.tls_client_fps.most_common(3)))
         if meta.tls_server_fps:
             doc.kv("JA3S sent", ", ".join(f"{fp} \u00d7{n}" for fp, n in meta.tls_server_fps.most_common(3)))
-        enrich = getattr(session, "enrichment", None)
-        if enrich is not None:
-            for key, value in enrich.describe_host(ip, list(meta.macs)):
-                doc.kv(key, value)
         doc.dim("Only metadata present in the capture is shown. Names come from")
         doc.dim("DNS answers, DHCP host-name options or TLS handshakes observed here.")
+    enrich = getattr(session, "enrichment", None)
+    if enrich is not None and enrich.active:
+        rows = enrich.describe_host(ip, list(meta.macs) if meta else [])
+        doc.section("REFERENCE DATA", "offline databases, not capture data", theme.S_DIM)
+        if not rows:
+            doc.dim("no entry for this host")
+        for key, value in rows:
+            doc.kv(key, value, theme.S_DIM)
+    elif meta is not None:
+        from trace_zero.enrich import mac_kind
+
+        kinds = [(m, mac_kind(m)) for m in meta.macs]
+        if any(k for _m, k in kinds):
+            doc.section("ADDRESS FACTS", "from the address bits themselves", theme.S_DIM)
+            for m, k in kinds:
+                if k:
+                    doc.kv("MAC type", f"{k} ({m})", theme.S_DIM)
     related = [f for f in session.capture.findings if ip in f.hosts]
     if related:
         doc.section("POSSIBLE ANOMALIES", "heuristic")

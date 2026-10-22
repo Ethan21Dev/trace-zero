@@ -159,6 +159,12 @@ def render_html(report: dict[str, Any]) -> str:
         if facts["dns_queries_top"]:
             out.append("<h3>DNS questions observed</h3>")
             out.append(_table(["name", "queries"], [[d["name"], d["queries"]] for d in facts["dns_queries_top"]], {1}))
+    ref = report.get("reference_data")
+    if ref and ref.get("hosts"):
+        out.append("<h2>Reference data</h2>")
+        out.append(f'<p class="notice">{e(ref["notice"])}</p>')
+        out.append("<ul>" + "".join(f"<li>{e(src)}</li>" for src in ref["sources"]) + "</ul>")
+        out.append(_table(["address", "field", "value"], [[ip, r["field"], r["value"]] for ip, rows in ref["hosts"].items() for r in rows]))
     out.append("<h2>Heuristic findings - possible anomalies</h2>")
     out.append(f'<p class="notice">{e(hf["notice"])}</p>')
     if not hf["findings"]:

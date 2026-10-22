@@ -34,6 +34,7 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "maxminddb>=2.0",  # reference reader, cross-checks the built-in MMDB reader in tests
 ]
 
 [project.scripts]

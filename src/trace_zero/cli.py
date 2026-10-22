@@ -31,6 +31,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--html", type=Path, help="headless: write the HTML report here")
     p.add_argument("--filter", metavar="EXPR", help="headless: filter expression (same syntax as / in the TUI)")
     p.add_argument("--pcap", type=Path, metavar="OUT", help="headless: export the (filtered) packets to PCAPNG")
+    p.add_argument("--oui", type=Path, metavar="FILE", help="IEEE oui.csv or Wireshark manuf file for MAC vendor names")
+    p.add_argument("--geoip", type=Path, action="append", default=[], metavar="FILE", help="MaxMind .mmdb database (repeatable: City/Country/ASN)")
     p.add_argument("--no-cache", action="store_true", help="parse from scratch; do not read or write the capture cache")
     p.add_argument("--clear-cache", action="store_true", help="delete all cached parsed captures and exit")
     p.add_argument("--generate-sample", type=Path, metavar="FILE", help="write the synthetic sample capture and exit")
@@ -70,6 +72,8 @@ def _headless(args: argparse.Namespace, cfg: Config) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     session = Session(cfg, store, inv)
+    for problem in session.enrichment_problems:
+        print(f"warning: reference data: {problem}", file=sys.stderr)
     session.attach(loaded)
     if args.filter:
         from trace_zero.analysis.filters import FilterError
@@ -132,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.db:
         cfg = dataclasses.replace(cfg, db_path=args.db)
+    if args.oui or args.geoip:
+        cfg = dataclasses.replace(cfg, oui_path=args.oui or cfg.oui_path, mmdb_paths=tuple(args.geoip) or cfg.mmdb_paths)
     if args.no_cache:
         cfg = dataclasses.replace(cfg, limits=dataclasses.replace(cfg.limits, cache_max_mb=0))
     if args.clear_cache:

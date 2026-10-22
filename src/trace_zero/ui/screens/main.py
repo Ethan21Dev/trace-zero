@@ -205,6 +205,8 @@ class MainScreen(Screen):
         self._refresh_chrome()
         self._refresh_inspector()
         self._refresh_tabs()
+        for problem in self.session.enrichment_problems:
+            self.app.notify(problem, title="reference data not loaded", severity="warning", timeout=8)
         if self.initial_capture:
             self.start_load(self.initial_capture)
 
