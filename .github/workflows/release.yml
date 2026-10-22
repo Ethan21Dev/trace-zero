@@ -130,4 +130,9 @@ jobs:
           find artifacts -type f ! -name '*.sha256' -exec cp {} upload/ \;
           (cd upload && sha256sum * > SHA256SUMS)
           cat upload/SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --title "TRACE//ZERO $GITHUB_REF_NAME" --generate-notes --verify-tag
+          # A release created by hand on github.com (which also creates the tag) gets the files attached.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --title "TRACE//ZERO $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
