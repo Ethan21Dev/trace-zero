@@ -47,7 +47,7 @@ Requires Python 3.11+ (tested on 3.11, 3.12 and 3.13). Dependencies: Textual, Ri
 ### Linux
 
 ```bash
-git clone https://github.com/<you>/trace-zero.git
+git clone https://github.com/Ethan21Dev/trace-zero.git
 cd trace-zero
 python3 -m venv .venv
 . .venv/bin/activate
@@ -61,7 +61,7 @@ trace-zero sample.pcapng
 
 ```bash
 sudo apt update && sudo apt install -y python3 python3-venv python3-pip git
-git clone https://github.com/<you>/trace-zero.git && cd trace-zero
+git clone https://github.com/Ethan21Dev/trace-zero.git && cd trace-zero
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 trace-zero --generate-sample sample.pcapng --format pcapng
@@ -75,7 +75,7 @@ Run it inside **Windows Terminal** (the WSL profile) for full colour and Unicode
 ### Windows (native, Windows Terminal + PowerShell)
 
 ```powershell
-git clone https://github.com/<you>/trace-zero.git
+git clone https://github.com/Ethan21Dev/trace-zero.git
 cd trace-zero
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1

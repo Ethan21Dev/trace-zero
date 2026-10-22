@@ -15,7 +15,7 @@ sudo apt install -y python3 python3-venv git
 # Fedora
 sudo dnf install -y python3 git
 
-git clone https://github.com/<you>/trace-zero.git
+git clone https://github.com/Ethan21Dev/trace-zero.git
 cd trace-zero
 python3 -m venv .venv
 . .venv/bin/activate
@@ -36,7 +36,7 @@ Inside tmux, enable true colour: `set -g default-terminal "tmux-256color"` and
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git
-git clone https://github.com/<you>/trace-zero.git
+git clone https://github.com/Ethan21Dev/trace-zero.git
 cd trace-zero
 python3 -m venv .venv
 . .venv/bin/activate
@@ -57,7 +57,7 @@ Debian 12 ships Python 3.11, which is supported.
 3. In PowerShell inside Windows Terminal:
 
 ```powershell
-git clone https://github.com/<you>/trace-zero.git
+git clone https://github.com/Ethan21Dev/trace-zero.git
 cd trace-zero
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1      # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
