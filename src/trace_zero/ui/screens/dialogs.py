@@ -166,13 +166,38 @@ class OpenCaptureScreen(ModalScreen[str | None]):
 
 
 class FilterScreen(ModalScreen[str | None]):
-    DEFAULT_CSS = _css("FilterScreen")
-    BINDINGS = [Binding("escape", "cancel", "cancel")]
+    """Filter entry with history (up/down), saved filters (tab to the list) and ctrl+s to save."""
 
-    def __init__(self, initial: str, t0: float) -> None:
+    DEFAULT_CSS = _css("FilterScreen") + """
+    FilterScreen #saved { height: auto; max-height: 8; margin-top: 1; }
+    """
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel"),
+        Binding("up", "history(1)", "older", show=False),
+        Binding("down", "history(-1)", "newer", show=False),
+        Binding("ctrl+s", "save", "save filter"),
+        Binding("delete", "delete_saved", "delete saved", show=False),
+    ]
+
+    def __init__(
+        self,
+        initial: str,
+        t0: float,
+        history: Iterable[str] = (),
+        saved: Iterable[tuple[str, str]] = (),
+        on_save=None,
+        on_delete=None,
+    ) -> None:
+        """``on_save(name, expression)`` returns an error message or None; ``on_delete(name)``."""
         super().__init__()
         self.initial = initial
         self.t0 = t0
+        self.history = [h for h in history if h]
+        self.saved = list(saved)
+        self.on_save = on_save
+        self.on_delete = on_delete
+        self.history_pos = -1
+        self.draft = initial
 
     def compose(self) -> ComposeResult:
         help_text = Text()
@@ -183,12 +208,24 @@ class FilterScreen(ModalScreen[str | None]):
             frame.border_title = "SEARCH / FILTER"
             yield Input(value=self.initial, placeholder="e.g. host:10.0.0.5 proto:tcp flags:S", id="expr")
             yield Static("", id="msg", classes="hint", markup=False)
+            yield VirtualTable([Col("SAVED FILTER", 22), Col("EXPRESSION")], id="saved")
             yield Static(help_text, classes="hint")
-            yield Static("enter apply (empty clears)  │  esc cancel", classes="hint")
+            yield Static(
+                "enter apply (empty clears)  \u2502  up/down history  \u2502  ctrl+s save  \u2502  tab saved list (del removes)  \u2502  esc cancel",
+                classes="hint",
+            )
 
     def on_mount(self) -> None:
+        self._fill_saved()
         self.query_one("#expr", Input).focus()
         self._validate(self.initial)
+
+    def _fill_saved(self) -> None:
+        table = self.query_one("#saved", VirtualTable)
+        saved = self.saved
+        table.set_data(len(saved), lambda i: [Text(saved[i][0], style=theme.S_CYAN), saved[i][1]], lambda i: saved[i][0], notify=False)
+        table.display = bool(saved)
+        table.styles.height = min(len(saved), 7) + 1
 
     def _validate(self, text: str) -> bool:
         msg = self.query_one("#msg", Static)
@@ -196,20 +233,74 @@ class FilterScreen(ModalScreen[str | None]):
             flt = compile_filter(text, self.t0)
         except FilterError as exc:
             msg.set_classes("error")
-            msg.update(clean(f"✕ {exc}"))
+            msg.update(clean(f"\u2715 {exc}"))
             return False
         msg.set_classes("ok")
-        msg.update("✓ valid" if flt else "empty expression clears the filter")
+        msg.update("\u2713 valid" if flt else "empty expression clears the filter")
         return True
+
+    def _set_text(self, text: str) -> None:
+        expr = self.query_one("#expr", Input)
+        expr.value = text
+        expr.cursor_position = len(text)
 
     @on(Input.Changed, "#expr")
     def changed(self, event: Input.Changed) -> None:
+        if self.history_pos == -1:
+            self.draft = event.value
         self._validate(event.value)
 
     @on(Input.Submitted, "#expr")
     def submitted(self, event: Input.Submitted) -> None:
         if self._validate(event.value):
             self.dismiss(event.value.strip())
+
+    @on(VirtualTable.Activated, "#saved")
+    def saved_chosen(self, event: VirtualTable.Activated) -> None:
+        expression = dict(self.saved).get(event.key)
+        if expression is not None and self._validate(expression):
+            self.dismiss(expression)
+
+    def action_history(self, step: int) -> None:
+        if not isinstance(self.focused, Input) or not self.history:
+            return
+        pos = max(-1, min(len(self.history) - 1, self.history_pos + step))
+        if pos == self.history_pos:
+            return
+        self.history_pos = pos
+        self._set_text(self.draft if pos == -1 else self.history[pos])
+
+    def action_save(self) -> None:
+        text = self.query_one("#expr", Input).value.strip()
+        if not text or not self._validate(text):
+            self.app.notify("enter a valid, non-empty filter to save", severity="warning")
+            return
+        if self.on_save is None:
+            return
+
+        def named(name: str | None) -> None:
+            if not name:
+                return
+            error = self.on_save(name, text)
+            if error:
+                self.app.notify(error, severity="error")
+                return
+            self.saved = sorted({**dict(self.saved), name.strip(): text}.items())
+            self._fill_saved()
+            self.app.notify(f"saved filter '{name.strip()}'")
+
+        self.app.push_screen(PromptScreen("SAVE FILTER", f"name for: {text}", max_length=60), named)
+
+    def action_delete_saved(self) -> None:
+        table = self.query_one("#saved", VirtualTable)
+        if self.focused is not table or table.current_key() is None:
+            return
+        name = str(table.current_key())
+        if self.on_delete is not None:
+            self.on_delete(name)
+        self.saved = [(n, e) for n, e in self.saved if n != name]
+        self._fill_saved()
+        self.query_one("#expr", Input).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)

@@ -8,6 +8,7 @@ from textual.notifications import SeverityLevel
 
 from trace_zero import PRODUCT, TAGLINE
 from trace_zero.session import Session
+from trace_zero.ui.commands import WorkspaceCommands
 from trace_zero.ui.screens.main import MainScreen
 from trace_zero.ui.theme import TRACE_ZERO_THEME
 
@@ -16,7 +17,8 @@ class TraceZeroApp(App):
     CSS_PATH = "app.tcss"
     TITLE = PRODUCT
     SUB_TITLE = TAGLINE
-    ENABLE_COMMAND_PALETTE = False
+    COMMANDS = {WorkspaceCommands}
+    COMMAND_PALETTE_BINDING = "ctrl+p"
     BINDINGS = [Binding("ctrl+q", "quit", "quit", priority=True, show=False)]
 
     def __init__(self, session: Session, capture: str | list[str] | None = None) -> None:

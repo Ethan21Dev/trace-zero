@@ -1142,14 +1142,44 @@ class MainScreen(Screen):
         def done(text: str | None) -> None:
             if text is None:
                 return
-            try:
-                flt = s.compile(text)
-            except FilterError as exc:
-                self.app.notify(str(exc), severity="error")
-                return
-            self._set_filter(flt, None)
+            self.apply_filter_text(text)
 
-        self.app.push_screen(FilterScreen(initial, s.capture.index.t0), done)
+        def save(name: str, expression: str) -> str | None:
+            try:
+                s.store.save_filter(name, expression)
+            except StorageError as exc:
+                return str(exc)
+            return None
+
+        self.app.push_screen(
+            FilterScreen(
+                initial,
+                s.capture.index.t0,
+                history=s.store.filter_history(),
+                saved=s.store.saved_filters(),
+                on_save=save,
+                on_delete=s.store.delete_saved_filter,
+            ),
+            done,
+        )
+
+    def apply_filter_text(self, text: str) -> None:
+        """Compile and apply a filter expression; remembered in the filter history."""
+        s = self.session
+        if s.capture is None:
+            self.app.notify("open a capture first (o)", severity="warning")
+            return
+        try:
+            flt = s.compile(text)
+        except FilterError as exc:
+            self.app.notify(str(exc), severity="error")
+            return
+        if text.strip():
+            try:
+                s.store.record_filter(text)
+            except StorageError:
+                pass  # history is a convenience; never block filtering on it
+        self._set_filter(flt, None)
 
     def _set_filter(self, flt: PacketFilter | None, label: str | None) -> None:
         s = self.session

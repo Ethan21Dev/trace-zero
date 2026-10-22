@@ -582,3 +582,104 @@ async def test_window_diff_and_marks(tmp_path, sample_pcap):
         assert second in main.mark_times
         await pilot.press("D")
         assert main.diff_base is None
+
+
+async def test_filter_history_and_saved_filters(tmp_path, sample_pcap):
+    app, s = make_app(tmp_path, sample_pcap)
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        for expr in ("proto:dns", "port:3389"):
+            await pilot.press("slash")
+            await pilot.pause()
+            app.screen.query_one("#expr", Input).value = expr
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+        assert s.store.filter_history()[:2] == ["port:3389", "proto:dns"]
+        # up/down walks the history, newest first, and returns to the draft
+        await pilot.press("slash")
+        await pilot.pause()
+        expr = app.screen.query_one("#expr", Input)
+        expr.value = "draft"
+        await pilot.press("up")
+        assert expr.value == "port:3389"
+        await pilot.press("up")
+        assert expr.value == "proto:dns"
+        await pilot.press("down", "down")
+        assert expr.value == "draft"
+        # ctrl+s names and saves the current expression
+        expr.value = "proto:tcp flags:S"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert isinstance(app.screen, PromptScreen)
+        app.screen.query_one(Input).value = "[b]syns"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert s.store.saved_filters() == [("[b]syns", "proto:tcp flags:S")]
+        saved = app.screen.query_one("#saved", VirtualTable)
+        assert saved.display and saved.count == 1
+        await pilot.press("escape")
+        await pilot.pause()
+        # reopen: tab to the saved list, enter applies it
+        await pilot.press("slash")
+        await pilot.pause()
+        app.screen.query_one("#saved", VirtualTable).focus()
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert isinstance(app.screen, type(app.main))
+        assert s.filter is not None and s.filter.text == "proto:tcp flags:S"
+        # delete removes a saved filter from the list and the database
+        await pilot.press("slash")
+        await pilot.pause()
+        app.screen.query_one("#saved", VirtualTable).focus()
+        await pilot.press("delete")
+        await pilot.pause()
+        assert s.store.saved_filters() == []
+        assert not app.screen.query_one("#saved", VirtualTable).display
+
+
+async def test_command_palette_runs_actions_and_saved_filters(tmp_path, sample_pcap):
+    from textual.command import CommandPalette
+
+    app, s = make_app(tmp_path, sample_pcap)
+    s.store.save_filter("rdp", "port:3389")
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert isinstance(app.screen, CommandPalette)
+        await pilot.press(*"flows")
+        await pilot.pause(0.5)
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert app.main.center_view == "flows"
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        await pilot.press(*"filter: rdp")
+        await pilot.pause(0.5)
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause(0.3)
+        assert s.filter is not None and s.filter.text == "port:3389"
+        assert s.store.filter_history()[0] == "port:3389"
+
+
+async def test_command_palette_shows_markup_like_filters_verbatim(tmp_path, sample_pcap):
+    from textual.command import CommandPalette
+    from textual.content import Content
+
+    from trace_zero.ui.commands import WorkspaceCommands
+
+    app, s = make_app(tmp_path, sample_pcap)
+    s.store.save_filter("[red]x", "dns:[b]evil")
+    async with app.run_test(size=WIDE) as pilot:
+        await wait_loaded(app, pilot, s)
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert isinstance(app.screen, CommandPalette)
+        provider = WorkspaceCommands(app.screen)
+        hits = [h async for h in provider.search("red")]
+        hit = next(h for h in hits if h.text == "filter: [red]x")
+        assert hit.match_display.plain == "filter: [red]x"
+        assert Content.from_markup(hit.help).plain == "dns:[b]evil"
