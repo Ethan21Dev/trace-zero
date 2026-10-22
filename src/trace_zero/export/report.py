@@ -109,6 +109,7 @@ def build_report(session) -> dict[str, Any]:
         "stop_reason": r.stop_reason,
         "parser_warnings": r.warnings,
         "parse_seconds": round(r.elapsed_s, 3),
+        "live_in_progress": r.live,
         "sources": [
             {"filename": i.name, "path": i.path, "sha256": i.sha256, "size_bytes": i.size, "format": i.fmt, "first_frame": o + 1, "packets": c}
             for i, o, c in r.source_list()

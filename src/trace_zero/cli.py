@@ -3,6 +3,7 @@
     trace-zero [CAPTURE ...]                   interactive TUI
     trace-zero CAPTURE [CAPTURE ...] --headless [--json F] [--html F]
     trace-zero --generate-sample FILE [--format pcapng]
+    trace-zero --follow FILE | --capture IFACE [--capture-filter BPF]   live mode
 """
 
 from __future__ import annotations
@@ -34,6 +35,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--oui", type=Path, metavar="FILE", help="IEEE oui.csv or Wireshark manuf file for MAC vendor names")
     p.add_argument("--geoip", type=Path, action="append", default=[], metavar="FILE", help="MaxMind .mmdb database (repeatable: City/Country/ASN)")
     p.add_argument("--verify", action="store_true", help="re-hash every capture recorded in the investigation (-i) and exit 0 if all match, 3 if not")
+    live = p.add_argument_group("live mode (the capture tool needs capture permission; TRACE//ZERO never does)")
+    live.add_argument("--follow", type=Path, metavar="FILE", help="follow a capture file while another program writes it")
+    live.add_argument("--capture", dest="capture_iface", metavar="IFACE", help="capture on IFACE with dumpcap/tcpdump (passive, not promiscuous) and follow it")
+    live.add_argument("--capture-filter", default="", metavar="BPF", help="capture filter for --capture")
+    live.add_argument("--capture-out", type=Path, metavar="FILE", help="file for --capture (default: a new file in the export folder)")
+    live.add_argument("--list-interfaces", action="store_true", help="list interfaces the capture tool can use and exit")
     p.add_argument("--no-cache", action="store_true", help="parse from scratch; do not read or write the capture cache")
     p.add_argument("--clear-cache", action="store_true", help="delete all cached parsed captures and exit")
     p.add_argument("--generate-sample", type=Path, metavar="FILE", help="write the synthetic sample capture and exit")
@@ -188,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"removed {n} cache file(s) from {cfg.cache_dir}")
         return 0
     _setup_logging()
+    if args.list_interfaces:
+        return _list_interfaces(cfg)
     if args.verify:
         return _verify(args, cfg)
     if args.headless:
@@ -196,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
         if not Path(capture).expanduser().exists():
             print(f"error: capture not found: {capture}", file=sys.stderr)
             return 1
+    if sum(bool(x) for x in (args.capture, args.follow, args.capture_iface)) > 1:
+        print("error: use one of: capture file(s), --follow FILE, --capture IFACE", file=sys.stderr)
+        return 2
+    if args.follow and not args.follow.expanduser().is_file():
+        print(f"error: file to follow not found: {args.follow}", file=sys.stderr)
+        return 1
 
     from trace_zero.session import Session
     from trace_zero.storage import StorageError, Store
@@ -207,12 +222,77 @@ def main(argv: list[str] | None = None) -> int:
     except StorageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    app = TraceZeroApp(Session(cfg, store, inv), args.capture or None)
+    live = None
+    if args.follow:
+        live = (str(args.follow.expanduser()), None)
+    elif args.capture_iface:
+        try:
+            proc = _start_capture(args, cfg)
+        except _CliError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            store.close()
+            return 1
+        live = (str(proc.out_path), proc)
+    session = Session(cfg, store, inv)
+    app = TraceZeroApp(session, args.capture or None, live)
     try:
         app.run()
     finally:
+        if session.live is not None:
+            session.live.stop_tool()  # never leave a capture tool running
+        elif live is not None and live[1] is not None:
+            live[1].stop()
         store.close()
     return 0
+
+
+class _CliError(Exception):
+    pass
+
+
+def _list_interfaces(cfg: Config) -> int:
+    from trace_zero.live import CaptureToolError, find_tool, list_interfaces
+
+    try:
+        tool = find_tool(cfg.capture_tool)
+        if tool is None:
+            print("error: no capture tool found; install Wireshark (dumpcap) or tcpdump", file=sys.stderr)
+            return 1
+        interfaces = list_interfaces(tool)
+    except CaptureToolError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"capture tool   {tool.kind}  ({tool.path})")
+    for i in interfaces:
+        print(f"  {i.name:<24} {i.description}")
+    return 0
+
+
+def _start_capture(args: argparse.Namespace, cfg: Config):
+    import time
+
+    from trace_zero.config import default_data_dir
+    from trace_zero.export.report import slug
+    from trace_zero.live import CaptureProcess, CaptureToolError, find_tool, list_interfaces
+
+    try:
+        tool = find_tool(cfg.capture_tool)
+        if tool is None:
+            raise _CliError("no capture tool found; install Wireshark (dumpcap) or tcpdump")
+        names = [i.name for i in list_interfaces(tool)]
+        if args.capture_iface not in names:
+            raise _CliError(f"{tool.kind} does not list interface '{args.capture_iface}' (available: {', '.join(names)})")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        ext = "pcapng" if tool.kind == "dumpcap" else "pcap"
+        out = (args.capture_out or Path(cfg.export_dir) / f"live-{slug(args.capture_iface)}-{stamp}.{ext}").expanduser()
+        proc = CaptureProcess(
+            tool, args.capture_iface, out, default_data_dir() / "capture-tool.log", args.capture_filter, cfg.limits.max_packets, cfg.limits.max_file_mb
+        )
+        proc.start()
+    except CaptureToolError as exc:
+        raise _CliError(str(exc)) from exc
+    print(f"capturing on {args.capture_iface} with {tool.kind} into {out}")
+    return proc
 
 
 if __name__ == "__main__":

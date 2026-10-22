@@ -39,8 +39,9 @@ class HeaderBar(Widget):
             "busy": theme.S_AMBER,
             "warn": theme.S_AMBER,
             "error": theme.S_RED,
+            "live": theme.S_RED,
         }.get(kind, theme.S_DIM)
-        dot = {"ok": "●", "busy": "◌", "warn": "▲", "error": "✕"}.get(kind, "○")
+        dot = {"ok": "●", "busy": "◌", "warn": "▲", "error": "✕", "live": "●"}.get(kind, "○")
         t = Text(no_wrap=True, overflow="ellipsis")
         t.append(PRODUCT, theme.S_CYAN_B)
         t.append(SEP, theme.S_FAINT)

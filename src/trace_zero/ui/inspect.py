@@ -102,7 +102,11 @@ def overview(session: Session) -> Group:
     doc.kv("file", r.file.name)
     doc.kv("format", r.file.fmt)
     doc.kv("size", f"{fmt_bytes(r.file.size)} ({r.file.size:,} B)")
-    doc.kv("sha256", r.file.sha256)
+    if r.live:
+        doc.kv("sha256", "pending - computed when the live capture stops")
+        doc.kv("live id", r.file.sha256)
+    else:
+        doc.kv("sha256", r.file.sha256)
     doc.kv("packets", f"{len(r.packets):,}")
     doc.kv("on wire", fmt_bytes(idx.total_bytes))
     if r.packets:

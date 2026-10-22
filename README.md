@@ -2,8 +2,8 @@
 
 **EVERY PACKET LEAVES A TRACE.**
 
-TRACE//ZERO is a keyboard-driven terminal instrument for offline network forensics.
-Open a PCAP or PCAPNG capture, scrub through it with a deterministic time machine,
+TRACE//ZERO is a keyboard-driven terminal instrument for network forensics.
+Open a PCAP or PCAPNG capture - or follow one while it is being recorded - scrub through it with a deterministic time machine,
 watch hosts and links appear on a network map as the cursor moves, follow reassembled
 streams, compare two moments of the capture, review transparent anomaly heuristics, and
 keep triage, notes, bookmarks and hashed exports in a persistent investigation.
@@ -17,8 +17,11 @@ keep triage, notes, bookmarks and hashed exports in a persistent investigation.
 
 ## What it is - and is not
 
-* **Offline.** It reads capture files you explicitly choose. It needs no administrator
-  privilege, no capture driver and no special hardware, and makes no network connections.
+* **It reads files.** It analyses capture files you explicitly choose, including files that are
+  still growing (live mode). It never captures packets itself, never asks for administrator
+  privileges, and makes no network connections. For live capture it can start Wireshark's
+  `dumpcap` or `tcpdump`; only that tool needs capture permission, and the capture is passive,
+  receive-only and never promiscuous.
 * **Evidence stays read-only.** Captures are opened read-only and hashed (SHA-256) at import.
   Re-verify them at any time (`V`, or `trace-zero --verify`); every export gets a `.sha256` sidecar.
 * **Nothing leaves the machine.** No telemetry, no uploads, no online lookups. MAC vendor and
@@ -33,6 +36,7 @@ keep triage, notes, bookmarks and hashed exports in a persistent investigation.
 | Area | What you get |
 | --- | --- |
 | Import | PCAP (µs and ns) and PCAPNG; Ethernet, 802.1Q/QinQ, Linux SLL/SLL2, BSD loopback, raw IPv4/IPv6. Background import with progress, `esc` to cancel. Malformed, truncated and empty files are reported, not fatal. Several captures (for example two sensors) can be merged onto one timeline. |
+| Live mode | Follow a PCAP/PCAPNG file while another program writes it, or start `dumpcap`/`tcpdump` on an interface (`F`). Every view, filter, finding, flow and export works on the data received so far; the timeline keeps following the newest packets. Stopping hashes the finished file and analyses it exactly as an offline import. |
 | Instant reopen | Parsed captures, indexes, findings and flows are cached on disk keyed by the file's SHA-256. Reopening a 263k-packet capture takes ~1.5 s instead of ~16 s. |
 | Decoding | Timestamps, MACs, VLAN, IPv4/IPv6 (incl. extension headers, fragments), TCP, UDP, ICMP/ICMPv6 (including the quoted packet inside errors), ARP, DHCP (hostname, requested/assigned address, lease), DNS/mDNS/LLMNR, HTTP request/status lines, TLS ClientHello (SNI, ALPN, versions, **JA3**, **JA4**), ServerHello (**JA3S**) and certificates (subject/issuer CN, SANs; TLS 1.2 and below). Absent fields stay empty - never guessed. |
 | Hosts | Per-window and whole-capture traffic, peers, MACs, TTLs, ports accepting TCP, names **only** when DNS, DHCP or TLS in the capture shows them, TLS fingerprints, and optional offline MAC vendor / country / ASN. |
@@ -109,7 +113,8 @@ trace-zero --generate-sample sample.pcapng --format pcapng
 trace-zero sample.pcapng
 ```
 
-No Npcap/WinPcap is needed: TRACE//ZERO only reads files. Use Windows Terminal rather than
+No Npcap/WinPcap is needed to analyse files (live capture on an interface uses Wireshark's
+dumpcap, which brings Npcap). Use Windows Terminal rather than
 the legacy console host. See [docs/SETUP.md](docs/SETUP.md) for fonts, sizes and details.
 
 ### Other ways to run
@@ -143,6 +148,7 @@ trace-zero                                         # start empty, press o to ope
 | `T` `z` `Z` | triage, suppress, show suppressed | `s` `S` | sort / reverse |
 | `x` | raw bytes + scapy dissection | `X` | export packets to PCAPNG |
 | `e` | export JSON + HTML | `V` | verify evidence hashes |
+| `F` | live: follow / capture, stop | | |
 | `ctrl+p` | command palette | `r` `ctrl+n` `l` | rename, new, list investigations |
 | `?` | help | `q` | back, then quit |
 
@@ -211,6 +217,46 @@ triage decision; `z` suppresses findings like the selected one (reason required,
 exported). Details and thresholds: [docs/HEURISTICS.md](docs/HEURISTICS.md).
 
 ![Finding evidence on the timeline](docs/screenshots/04-finding-evidence.svg)
+
+### Live mode
+
+![Live mode following a growing capture](docs/screenshots/13-live-follow.svg)
+
+`F` offers two ways in:
+
+* **Follow a file** that another program is writing - `dumpcap -w`, `tcpdump -U -w`, a sensor,
+  a mirror-port recorder you already run. TRACE//ZERO needs only read access to the file.
+* **Capture on an interface**: TRACE//ZERO starts `dumpcap` (preferred) or `tcpdump` as a separate
+  process, lets you pick an interface from the tool's own list and an optional BPF capture filter,
+  and follows the file it writes to the export folder.
+
+```bash
+trace-zero --follow /captures/sensor.pcapng            # follow a growing file
+trace-zero --list-interfaces                            # what the capture tool can see
+trace-zero --capture eth0 --capture-filter "not port 22"
+```
+
+How it behaves:
+
+* The header shows `LIVE n pkts`. While the timeline cursor is at the end it follows new packets;
+  move it back to examine the past without being dragged forward.
+* Everything works while capture runs: filters, flows and follow stream, findings, triage, marks,
+  bookmarks, raw bytes and exports (marked as taken during a live capture).
+* Each refresh re-analyses everything received so far, so live results equal an offline analysis
+  of the same bytes. Refreshes adapt to the cost: about every second for small captures,
+  every ~10 s at 260k packets.
+* `F` again stops: the capture tool is asked to finish its file, the finished file is hashed
+  (SHA-256) and analysed by the normal offline pipeline, and everything recorded under the
+  provisional live id moves to that hash. The tool stopping on its own (limit reached, interface
+  gone) or the follower hitting a damaged or truncated file does the same.
+* Quitting TRACE//ZERO always stops a capture tool it started.
+
+What TRACE//ZERO starts is deliberately narrow: promiscuous mode is always off (`-p`), so only
+traffic to and from this machine plus broadcast/multicast is recorded; commands are argument
+lists, never shell strings; packet-count and file-size limits come from `[limits]`. Record
+traffic between other hosts (a mirror port or tap) only on networks you are authorised to
+monitor, with your own tooling, and follow its file. Permissions for `dumpcap`/`tcpdump` are
+covered in [docs/SETUP.md](docs/SETUP.md#live-capture-permissions).
 
 ### Offline reference data
 
@@ -281,7 +327,12 @@ synthetic generator (`scripts/generate_sample.py --scale N`):
 
 ## Known limitations
 
-* Analysis is of files: TRACE//ZERO does not capture traffic itself.
+* TRACE//ZERO does not capture traffic itself; live mode depends on `dumpcap`/`tcpdump` (or another
+  writer) and sustains roughly 25k packets/s of ingest. Each live refresh re-analyses the whole
+  capture so far (no incremental index), which is why refreshes slow down as it grows.
+* Finding IDs depend on their evidence, so a finding triaged early in a live capture can reappear
+  as a new finding once more evidence arrives; triage it again after stopping if needed.
+* Following stops if the file is rotated, truncated or replaced (ring buffers are not followed).
 * Memory is ~1.1 KB per packet: plain Python objects. A columnar store would cut this
   substantially; it is not implemented.
 * Stream reassembly covers TCP. IP fragments are flagged but not reassembled. HTTP/2, QUIC and

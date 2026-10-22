@@ -83,6 +83,17 @@ def export_sources(parts: list[tuple[FileInfo, set[int] | frozenset[int], int]],
             raise CaptureError(f"capture no longer accessible: {exc.strerror or exc}") from exc
         if st.st_size != info.size or st.st_mtime_ns != info.mtime_ns:
             raise CaptureError(f"{info.name} changed on disk since import; re-open it before exporting")
+
+    def records():
+        for info, wanted, offset in parts:
+            yield from _source_records(info, wanted, offset)
+
+    return write_records(records(), out_path, comment)
+
+
+def write_records(records, out_path: Path, comment: str) -> int:
+    """Write (linktype, timestamp ns, data, wire length) records to a new PCAPNG, atomically."""
+    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tz-", suffix=".pcapng", dir=str(out_path.parent))
     written = 0
@@ -90,8 +101,13 @@ def export_sources(parts: list[tuple[FileInfo, set[int] | frozenset[int], int]],
         with os.fdopen(fd, "wb") as out:
             out.write(section_header(comment))
             interfaces: dict[int, int] = {}
-            for info, wanted, offset in parts:
-                written += _copy_source(out, info, wanted, offset, interfaces)
+            for linktype, ts, data, wirelen in records:
+                iface = interfaces.get(linktype)
+                if iface is None:
+                    iface = interfaces[linktype] = len(interfaces)
+                    out.write(interface_block(linktype))
+                out.write(packet_block(iface, ts, data, max(wirelen, len(data))))
+                written += 1
         os.replace(tmp, out_path)
     except BaseException:
         try:
@@ -102,13 +118,12 @@ def export_sources(parts: list[tuple[FileInfo, set[int] | frozenset[int], int]],
     return written
 
 
-def _copy_source(out, info: FileInfo, wanted, offset: int, interfaces: dict[int, int]) -> int:
+def _source_records(info: FileInfo, wanted, offset: int):
     src = Path(info.path)
     mine = [n for n in wanted if n > offset]
     if not mine:
-        return 0
+        return
     last_wanted = max(mine)
-    written = 0
     with open(src, "rb") as raw_fh:
         reader = _open_reader(_GuardedFile(raw_fh), src, info.fmt)
         static_linktype = getattr(reader, "linktype", None)
@@ -130,11 +145,4 @@ def _copy_source(out, info: FileInfo, wanted, offset: int, interfaces: dict[int,
             linktype = getattr(meta, "linktype", None)
             if linktype is None:
                 linktype = static_linktype if static_linktype is not None else 147
-            iface = interfaces.get(linktype)
-            if iface is None:
-                iface = interfaces[linktype] = len(interfaces)
-                out.write(interface_block(linktype))
-            wirelen = getattr(meta, "wirelen", None) or len(data)
-            out.write(packet_block(iface, ts, data, max(wirelen, len(data))))
-            written += 1
-    return written
+            yield linktype, ts, data, getattr(meta, "wirelen", None) or len(data)

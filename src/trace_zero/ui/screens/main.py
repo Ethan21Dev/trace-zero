@@ -17,21 +17,23 @@ from textual.screen import Screen
 from textual.widgets import ContentSwitcher, Static
 from textual.worker import Worker, get_current_worker
 
-from trace_zero import PRODUCT, TAGLINE
+from trace_zero import PRODUCT, TAGLINE, custody
 from trace_zero.analysis.anomaly import SEVERITY_ORDER
 from trace_zero.analysis.diff import diff_windows
 from trace_zero.analysis.filters import FilterError, PacketFilter, frames_filter
 from trace_zero.analysis.flows import build_flows, flows_in_window
 from trace_zero.analysis.index import H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS_OUT, CaptureView, WindowStats, ip_sort_key
 from trace_zero.analysis.timeline import WindowMode
-from trace_zero import custody
 from trace_zero.export import export_all
+from trace_zero.config import default_data_dir
 from trace_zero.export.report import slug
+from trace_zero.live import CaptureProcess, CaptureToolError, LiveCapture, find_tool, list_interfaces
+from trace_zero.live.tool import validate_filter
 from trace_zero.models import fmt_bytes, fmt_duration, fmt_rel, fmt_ts
 from trace_zero.parsing.reader import CaptureError, ParseCancelled, validate_capture_path
 from trace_zero.parsing.scapy_bridge import dissect_frame
 from trace_zero.sanitize import clean
-from trace_zero.session import LoadedCapture, Selection, Session, load_captures
+from trace_zero.session import LoadedCapture, Selection, Session, load_capture, load_captures
 from trace_zero.storage import StorageError
 from trace_zero.ui import inspect, theme
 from trace_zero.ui.mapgeo import MapEdge, MapNode
@@ -123,6 +125,7 @@ class MainScreen(Screen):
         Binding("e", "export", "export"),
         Binding("X,shift+x", "export_pcap", "export packets"),
         Binding("V,shift+v", "verify", "verify evidence"),
+        Binding("F,shift+f", "live", "live capture"),
         Binding("T,shift+t", "triage", "triage finding"),
         Binding("d", "diff", "compare windows"),
         Binding("D,shift+d", "clear_diff", "clear baseline"),
@@ -138,9 +141,10 @@ class MainScreen(Screen):
         Binding("enter", "open_selected", "open", show=False),
     ]
 
-    def __init__(self, session: Session, initial_capture: str | list[str] | None = None) -> None:
+    def __init__(self, session: Session, initial_capture: str | list[str] | None = None, initial_live: tuple | None = None) -> None:
         super().__init__()
         self.session = session
+        self.initial_live = initial_live  # (path, CaptureProcess or None)
         self.initial_capture = initial_capture
         self.center_view = "empty"
         self.compact_panel = "center"
@@ -168,6 +172,10 @@ class MainScreen(Screen):
         self.finding_times: list[float] = []
         self.mark_times: list[float] = []
         self.loading: Worker | None = None
+        self._live_timer = None
+        self._live_inflight = False
+        self._live_stopping = False
+        self._live_due = 0.0
         self.load_status = ""
         self.busy = ""
         self._last_tick = 0.0
@@ -210,7 +218,9 @@ class MainScreen(Screen):
         self._refresh_tabs()
         for problem in self.session.enrichment_problems:
             self.app.notify(problem, title="reference data not loaded", severity="warning", timeout=8)
-        if self.initial_capture:
+        if self.initial_live:
+            self.start_live(*self.initial_live)
+        elif self.initial_capture:
             self.start_load(self.initial_capture)
 
     def on_resize(self) -> None:
@@ -249,6 +259,9 @@ class MainScreen(Screen):
 
     # ------------------------------------------------------------------ loading
     def start_load(self, path: str | list[str]) -> None:
+        if self.session.live is not None:
+            self.app.notify("a live capture is running: stop it first (F)", severity="warning")
+            return
         paths = [path] if isinstance(path, str) else list(path)
         try:
             for one in paths:
@@ -332,9 +345,18 @@ class MainScreen(Screen):
         cap = self.session.capture
         header = self.query_one(HeaderBar)
         if cap is None:
+            live = self.session.live
+            if live is not None:
+                header.set_state(capture=live.path.name, status=("live", "LIVE waiting for packets"))
+                return
             header.set_state(capture="no capture", status=("idle", "NO CAPTURE"))
             return
         r = cap.result
+        if r.live:
+            tl = self.session.timeline
+            following = tl is not None and tl.cursor >= tl.t1
+            header.set_state(capture=f"{r.file.name}  {fmt_bytes(r.file.size)}", status=("live", f"LIVE {len(r.packets):,} pkts" + ("  following" if following else "")))
+            return
         status = ("warn", f"TRUNCATED {len(r.packets):,} pkts") if r.truncated else ("ok", f"ANALYSED {len(r.packets):,} pkts")
         header.set_state(capture=f"{r.file.name}  {fmt_bytes(r.file.size)}", status=status)
 
@@ -474,6 +496,8 @@ class MainScreen(Screen):
             keys += [("w", "mode"), ("[ ]", "width"), ("+ -", "speed"), ("home/end", "jump"), ("k", "mark"), ("{ }", "marks"), ("d", "diff")]
         else:
             keys += [("h n c p f b", "views"), ("w", "mode"), ("+ -", "speed")]
+        if s.live is not None:
+            keys += [("F", "stop live")]
         keys += [("e", "export"), ("q", "back" if self.history else "quit")]
         lo, hi = tl.window()
         rng = f"{fmt_ts(lo)} → {fmt_ts(hi)} ({fmt_duration(hi - lo)})"
@@ -1124,6 +1148,9 @@ class MainScreen(Screen):
 
     # ------------------------------------------------------------------ actions: files & filters
     def action_open(self) -> None:
+        if self.session.live is not None:
+            self.app.notify("a live capture is running: stop it first (F)", severity="warning")
+            return
         cap = self.session.capture
         start = Path(cap.result.file.path).parent if cap else Path.cwd()
 
@@ -1134,6 +1161,9 @@ class MainScreen(Screen):
         self.app.push_screen(OpenCaptureScreen(start, self.session.config.limits), done)
 
     def action_add_capture(self) -> None:
+        if self.session.live is not None:
+            self.app.notify("a live capture is running: stop it first (F)", severity="warning")
+            return
         """Merge another capture (e.g. a second sensor) onto the current timeline."""
         cap = self.session.capture
         if cap is None:
@@ -1559,12 +1589,292 @@ class MainScreen(Screen):
         )
 
     def action_verify(self) -> None:
+        if self.session.live is not None:
+            self.app.notify("the live capture has no final hash yet: stop it (F) to hash and verify it", severity="warning")
+            return
         if self.session.capture is None:
             self.app.notify("open a capture first (o)", severity="warning")
             return
         self.busy = "VERIFYING"
         self._refresh_status()
         self._verify_worker()
+
+    # -- live mode -------------------------------------------------------------------------------
+    def action_live(self) -> None:
+        if self.session.live is not None:
+            def confirm(yes: bool | None) -> None:
+                if yes:
+                    self.stop_live("stopped by the analyst")
+
+            self.app.push_screen(ConfirmScreen("Stop the live capture, hash the finished file and analyse it?"), confirm)
+            return
+        if self.loading is not None and self.loading.is_running:
+            self.app.notify("an import is running; wait for it or cancel it (esc)", severity="warning")
+            return
+
+        def chosen(choice: str | None) -> None:
+            if choice == "follow":
+                self._ask_follow_path()
+            elif choice == "capture":
+                self._choose_interface()
+
+        self.app.push_screen(
+            ChoiceScreen(
+                "LIVE",
+                "TRACE//ZERO reads a capture file while it grows. It never captures by itself; "
+                "only the capture tool needs permission to capture.",
+                [
+                    ("follow", "f", "Follow a capture file that another program is writing"),
+                    ("capture", "c", "Capture on an interface with dumpcap / tcpdump (passive, not promiscuous)"),
+                ],
+            ),
+            chosen,
+        )
+
+    def _ask_follow_path(self) -> None:
+        def got(path: str | None) -> None:
+            if path and path.strip():
+                self.start_live(path.strip())
+
+        default = str(Path(self.session.config.export_dir).expanduser())
+        self.app.push_screen(PromptScreen("FOLLOW CAPTURE FILE", "Path of the growing .pcap / .pcapng file:", default), got)
+
+    def _choose_interface(self) -> None:
+        try:
+            tool = find_tool(self.session.config.capture_tool)
+        except CaptureToolError as exc:
+            self.app.notify(str(exc), severity="error")
+            return
+        if tool is None:
+            self.app.notify(
+                "no capture tool found: install Wireshark (dumpcap) or tcpdump, or follow a file written by another program",
+                severity="error",
+                timeout=10,
+            )
+            return
+        self.busy = "LISTING INTERFACES"
+        self._refresh_status()
+        self._interfaces_worker(tool)
+
+    @work(thread=True, exclusive=True, group="live-setup")
+    def _interfaces_worker(self, tool) -> None:
+        try:
+            interfaces, error = list_interfaces(tool), None
+        except CaptureToolError as exc:
+            interfaces, error = [], str(exc)
+        self.app.call_from_thread(self._interfaces_listed, tool, interfaces, error)
+
+    def _interfaces_listed(self, tool, interfaces, error: str | None) -> None:
+        self.busy = ""
+        self._refresh_status()
+        if error:
+            self.app.notify(error, title="cannot list interfaces", severity="error", timeout=12)
+            return
+        hotkeys = "123456789abcdeghijklmnoprstuvwxyz"
+        options = [(i.name, hotkeys[n] if n < len(hotkeys) else "", clean(i.label, 64)) for n, i in enumerate(interfaces[:60])]
+
+        def picked(name: str | None) -> None:
+            if name:
+                self._ask_capture_filter(tool, name)
+
+        self.app.push_screen(
+            ChoiceScreen(f"CAPTURE WITH {tool.kind.upper()}", "Interface. Only traffic to and from this machine (plus broadcast/multicast) is recorded.", options),
+            picked,
+        )
+
+    def _ask_capture_filter(self, tool, interface: str) -> None:
+        cfg = self.session.config
+
+        def got(bpf: str | None) -> None:
+            if bpf is None:
+                return
+            try:
+                bpf = validate_filter(bpf)
+            except CaptureToolError as exc:
+                self.app.notify(str(exc), severity="error")
+                return
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            ext = "pcapng" if tool.kind == "dumpcap" else "pcap"
+            out = Path(cfg.export_dir).expanduser() / f"live-{slug(interface)}-{stamp}.{ext}"
+            proc = CaptureProcess(tool, interface, out, default_data_dir() / "capture-tool.log", bpf, cfg.limits.max_packets, cfg.limits.max_file_mb)
+            self.busy = "STARTING CAPTURE"
+            self._refresh_status()
+            self._capture_start_worker(proc)
+
+        self.app.push_screen(
+            PromptScreen("CAPTURE FILTER", "Optional capture filter (BPF, e.g. 'not port 22'). Empty records everything:", "", allow_empty=True),
+            got,
+        )
+
+    @work(thread=True, exclusive=True, group="live-setup")
+    def _capture_start_worker(self, proc) -> None:
+        try:
+            proc.start()
+            error = None
+        except CaptureToolError as exc:
+            error = str(exc)
+        self.app.call_from_thread(self._capture_started, proc, error)
+
+    def _capture_started(self, proc, error: str | None) -> None:
+        self.busy = ""
+        self._refresh_status()
+        if error:
+            self.app.notify(error, title="capture did not start", severity="error", timeout=15)
+            return
+        self.start_live(str(proc.out_path), proc)
+
+    def start_live(self, path: str, process=None) -> None:
+        """Follow ``path`` (optionally written by a capture tool TRACE//ZERO started)."""
+        s = self.session
+        try:
+            live = LiveCapture(path, s.config, process)
+        except CaptureError as exc:
+            if process is not None:
+                process.stop()
+            self.app.notify(str(exc), title="cannot follow", severity="error")
+            return
+        self.timeline_pause()
+        # Clear whatever was open before: nothing is shown until the first live packets arrive.
+        s.capture = s.view = s.timeline = s.selection = s.filter = None
+        self.stats = None
+        self.focus_host = None
+        self.history.clear()
+        self.diff_base = None
+        self.raw_cache.clear()
+        if self.center_view != "empty":
+            self._switch_center("empty", record=False)
+        self._refresh_hosts()
+        self._refresh_inspector()
+        self._refresh_timeline()
+        s.start_live(live)
+        self._live_inflight = False
+        self._live_due = 0.0
+        if self._live_timer is None:
+            self._live_timer = self.set_interval(0.25, self._live_tick)
+        else:
+            self._live_timer.resume()
+        self.query_one(HeaderBar).set_state(capture=live.path.name, status=("live", "LIVE waiting for packets"))
+        self.app.notify(live.describe(), title="LIVE")
+        self._refresh_status()
+
+    def _live_tick(self) -> None:
+        live = self.session.live
+        if live is None or self._live_inflight or self._live_stopping or time.monotonic() < self._live_due:
+            return
+        self._live_inflight = True
+        self._live_worker(live, self.session.filter)
+
+    @work(thread=True, group="live")
+    def _live_worker(self, live, flt) -> None:
+        try:
+            update, error = live.refresh(flt), None
+        except CaptureError as exc:
+            update, error = None, str(exc)
+        except MemoryError:
+            update, error = None, "out of memory - lower [limits] max_packets"
+        except Exception as exc:  # noqa: BLE001 - surface, log, keep the app alive
+            log.exception("live refresh failed")
+            update, error = None, f"unexpected error ({type(exc).__name__}: {exc})"
+        self.app.call_from_thread(self._live_refreshed, live, flt, update, error)
+
+    def _live_refreshed(self, live, flt, update, error: str | None) -> None:
+        self._live_inflight = False
+        s = self.session
+        if live is not s.live or self._live_stopping:
+            return  # stopped (or replaced) while this refresh ran
+        self._live_due = time.monotonic() + live.interval
+        if error:
+            self.app.notify(error, title="live capture", severity="error", timeout=10)
+            self.stop_live(f"following stopped: {error}")
+            return
+        if update is not None:
+            first = s.capture is None or not s.capture.result.live
+            if s.filter is not flt:  # the filter changed while the snapshot was analysed
+                idx = update.loaded.index
+                update.view = idx.view(None, key="") if s.filter is None else CaptureView(idx, s.filter)
+            s.apply_live(update)
+            if first:
+                self.raw_cache.clear()
+                self.show_raw = False
+                if self.center_view == "empty":
+                    self._switch_center("map", record=False)
+                if not self.compact:
+                    self.query_one("#hosts-table", VirtualTable).focus()
+            # Raw bytes of earlier frames never change in an append-only file: raw_cache stays valid.
+            self._rebuild_event_markers()
+            self._reload_bookmarks()
+            self.refresh_all()
+            self._refresh_tabs()
+        self._restore_header()
+        if live.follower.stopped:
+            self.app.notify(live.follower.stopped, title="live capture", severity="warning", timeout=10)
+            self.stop_live(live.follower.stopped)
+        elif live.process is not None and not live.process.running:
+            code = live.process.returncode
+            detail = live.process.log_tail() if code else ""
+            self.stop_live(f"{live.process.tool.kind} exited (code {code})" + (f": {detail}" if detail else ""))
+
+    def stop_live(self, reason: str) -> None:
+        live = self.session.live
+        if live is None or self._live_stopping:
+            return
+        self._live_stopping = True
+        if self._live_timer is not None:
+            self._live_timer.pause()
+        self.busy = "FINALISING"
+        self.query_one(HeaderBar).set_state(status=("busy", "FINALISING: stopping, hashing, analysing"))
+        self._refresh_status()
+        self._live_finish_worker(live, reason)
+
+    @work(thread=True, exclusive=True, group="live-finish")
+    def _live_finish_worker(self, live, reason: str) -> None:
+        live.stop_tool()
+        try:
+            final, error = load_capture(live.path, self.session.config), None
+        except CaptureError as exc:
+            final, error = None, str(exc)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("live finalisation failed")
+            final, error = None, f"unexpected error ({type(exc).__name__}: {exc})"
+        self.app.call_from_thread(self._live_finished, live, final, reason, error)
+
+    def _live_finished(self, live, final, reason: str, error: str | None) -> None:
+        self._live_stopping = False
+        self.busy = ""
+        s = self.session
+        if final is None:
+            s.live = None
+            s.capture = None
+            s.store.log(s.investigation.id, "live", f"live capture ended without a usable file ({reason}): {error}")
+            self.app.notify(f"{reason}\n{error}", title="live capture ended", severity="error", timeout=12)
+            self._restore_header()
+            self.refresh_all()
+            return
+        try:
+            s.finish_live(final)
+        except StorageError as exc:
+            self.app.notify(f"capture analysed but not recorded: {exc}", severity="warning")
+        self.raw_cache.clear()
+        self.show_raw = False
+        self._rebuild_event_markers()
+        self._reload_bookmarks()
+        self._restore_header()
+        if self.center_view == "empty":
+            self._switch_center("map", record=False)
+        self.refresh_all()
+        self._refresh_tabs()
+        r = final.result
+        self.app.notify(
+            f"{reason}\n{len(r.packets):,} packets in {r.file.name}\nsha256 {r.file.sha256}",
+            title="LIVE CAPTURE FINISHED",
+            timeout=12,
+        )
+
+    def on_unmount(self) -> None:
+        # Never leave a capture tool running behind the application.
+        live = self.session.live
+        if live is not None:
+            live.stop_tool()
 
     @work(thread=True, exclusive=True, group="verify")
     def _verify_worker(self) -> None:

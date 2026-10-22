@@ -97,7 +97,10 @@ def render_html(report: dict[str, Any]) -> str:
         )
     if cap:
         out.append("<h2>Capture</h2>")
-        out.append('<p class="notice">Original capture treated as read-only evidence. Integrity hash computed at import.</p>')
+        if cap.get("live_in_progress"):
+            out.append('<p class="warn">Exported during a live capture: the file was still growing, so this report covers the packets received so far and the capture has no final SHA-256 yet (the identifier below is provisional).</p>')
+        else:
+            out.append('<p class="notice">Original capture treated as read-only evidence. Integrity hash computed at import.</p>')
         out.append(
             _dl(
                 [

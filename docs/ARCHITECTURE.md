@@ -16,6 +16,7 @@ session.py ◄────────┘   application state: capture, filter, 
   ├── cache.py           SHA-256-keyed on-disk cache of parsed captures, indexes and findings
   ├── enrich.py          offline reference data: OUI vendors, MaxMind DB reader
   ├── custody.py         evidence re-verification, export digests
+  ├── live/              live mode: followed capture state, capture-tool launcher
   └── parsing/           file validation, scapy framing, bounds-checked decoder, TLS, PCAPNG writer
         │
 models.py, sanitize.py, config.py   shared data types, untrusted-text handling, limits
@@ -28,6 +29,9 @@ models.py, sanitize.py, config.py   shared data types, untrusted-text handling, 
 | `parsing/reader.py` | Path validation (regular file, size limit, magic bytes), SHA-256, streaming import through scapy's `RawPcapReader` / `RawPcapNgReader`, progress + cancellation callbacks, damage detection, on-demand re-read of one frame. |
 | `parsing/decoder.py` | Bounds-checked `struct` decoder for link, network and transport layers, DHCP and the packet quoted inside ICMP errors; scapy `DNS` for DNS payloads; strict HTTP extraction. Produces `PacketRecord`. |
 | `parsing/tls.py` | TLS record/handshake parser: ClientHello (SNI, ALPN, versions, JA3, JA4), ServerHello (JA3S), certificate chain via a minimal bounds-checked DER reader. |
+| `parsing/follow.py` | Incremental PCAP/PCAPNG framer for growing files: consumes only complete records, remembers each frame's offset for raw re-reads, stops on damage, shrinkage or limits. Decodes with the same `decode_frame`, so packets match an offline import exactly. |
+| `live/model.py` | `LiveCapture`: follower + provisional identity; `refresh()` builds a full analysis snapshot in a worker and adapts the refresh interval to its cost. |
+| `live/tool.py` | Finds `dumpcap`/`tcpdump`, lists interfaces, builds passive non-promiscuous argument lists, runs and stops the tool. |
 | `parsing/writer.py` | PCAPNG writer: copies selected frames byte-for-byte from one or more source captures, nanosecond timestamps, provenance comment, atomic write. |
 | `parsing/scapy_bridge.py` | The only place scapy is imported; silences scapy's stderr logging (which would corrupt the TUI) and collects its warnings into the import report. |
 | `models.py` | `PacketRecord` (slots dataclass), `DnsInfo`, `ParseResult`, formatting helpers. |
@@ -75,6 +79,26 @@ models.py, sanitize.py, config.py   shared data types, untrusted-text handling, 
 Several captures load file by file (each cached separately) and are merged before indexing:
 frames are renumbered consecutively, each source keeps its `FileInfo` for raw re-reads and
 exports, and the combined identity is a SHA-256 over the sorted source hashes.
+
+## Live mode
+
+```
+capture tool (dumpcap / tcpdump / anything) --writes--> file --polls--> CaptureFollower
+                                                                           |  complete records only
+                                       LiveCapture.refresh (worker) <------+
+                                       index + detect + flows on everything so far
+                                                     |
+                               Session.apply_live (UI thread): keep filter, selection,
+                               timeline; cursor at the end keeps following
+                                                     |
+                          stop: tool stops -> SHA-256 -> load_capture (offline pipeline)
+                                -> provisional id re-keyed to the real hash
+```
+
+Re-analysing the whole capture on each refresh is a deliberate trade: results are always identical
+to an offline analysis, at the cost of refreshes slowing as the capture grows. Raw bytes, stream
+reassembly and exports read frames through the follower's offsets, which stay valid because bytes
+before the last complete record never change in an append-only file.
 
 ## The time machine
 
@@ -128,6 +152,10 @@ and hand results back to the main thread for journaling.
 * The HTML report escapes every value and ships a CSP of `default-src 'none'`.
 * Packet payloads are never executed, evaluated or passed to a shell.
 * No network code exists in the application; the test suite enforces this for scapy calls.
+* Live capture runs an external tool (`dumpcap`/`tcpdump`) as a child process: an argument list
+  (never a shell), an interface name taken from the tool's own listing, a validated BPF string,
+  promiscuous mode always off, output into a new file that must not exist yet. TRACE//ZERO never
+  elevates; the tool is stopped when live mode ends or the application exits.
 * Exports are written atomically, refuse to overwrite a source capture, and get `.sha256`
   sidecars. The PCAPNG writer re-checks size and modification time of every source first.
 * The cache never deserialises code: `marshal` of plain tuples only, behind a checksum.

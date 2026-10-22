@@ -22,10 +22,11 @@ class TraceZeroApp(App):
     COMMAND_PALETTE_BINDING = "ctrl+p"
     BINDINGS = [Binding("ctrl+q", "quit", "quit", priority=True, show=False)]
 
-    def __init__(self, session: Session, capture: str | list[str] | None = None) -> None:
+    def __init__(self, session: Session, capture: str | list[str] | None = None, live: tuple | None = None) -> None:
         super().__init__()
         self.session = session
         self.initial_capture = capture
+        self.initial_live = live
         self.register_theme(TRACE_ZERO_THEME)
         self.theme = TRACE_ZERO_THEME.name
 
@@ -39,7 +40,7 @@ class TraceZeroApp(App):
             self.push_screen(TracePalette(id="--command-palette"))
 
     def get_default_screen(self) -> MainScreen:
-        return MainScreen(self.session, self.initial_capture)
+        return MainScreen(self.session, self.initial_capture, self.initial_live)
 
     @property
     def main(self) -> MainScreen:

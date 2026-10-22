@@ -104,6 +104,8 @@ class Config:
     # Optional offline reference data (never fetched automatically).
     oui_path: Path | None = None
     mmdb_paths: tuple[Path, ...] = ()
+    # Live mode: explicit dumpcap/tcpdump path (otherwise found on PATH).
+    capture_tool: Path | None = None
 
 
 def _merge_section(obj: Any, data: dict[str, Any], section: str) -> Any:
@@ -155,4 +157,5 @@ def load_config(path: Path | None = None) -> Config:
     return Config(
         limits=limits, anomaly=anomaly, db_path=db_path, export_dir=export_dir, cache_dir=cache_dir,
         oui_path=oui_path, mmdb_paths=tuple(Path(g).expanduser() for g in geoip),
+        capture_tool=Path(paths["capture_tool"]).expanduser() if paths.get("capture_tool") else None,
     )

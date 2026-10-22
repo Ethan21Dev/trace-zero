@@ -504,6 +504,20 @@ class Store:
     def delete_saved_filter(self, name: str) -> None:
         self._exec("DELETE FROM saved_filters WHERE name=?", (name,))
 
+    def rekey_capture(self, inv_id: int, old_sha: str, new_sha: str) -> int:
+        """Move bookmarks, notes, marks and triage from one capture identity to another
+        (a live capture's provisional id to its final SHA-256). Returns rows moved."""
+        moved = 0
+        with self.conn:
+            for table in ("bookmarks", "notes", "marks", "finding_status"):
+                cur = self.conn.execute(
+                    f"UPDATE OR IGNORE {table} SET capture_sha256=? WHERE investigation_id=? AND capture_sha256=?",  # noqa: S608 - fixed names
+                    (new_sha, inv_id, old_sha),
+                )
+                moved += cur.rowcount
+                self.conn.execute(f"DELETE FROM {table} WHERE investigation_id=? AND capture_sha256=?", (inv_id, old_sha))  # noqa: S608
+        return moved
+
     # -- chain of custody --------------------------------------------------------------------------
     def prior_hashes(self, path: str) -> list[tuple[str, float, str]]:
         """Every (sha256, imported_at, investigation name) previously recorded for this path."""

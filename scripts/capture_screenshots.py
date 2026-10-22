@@ -42,6 +42,8 @@ SHOTS: list[tuple[str, tuple[int, int], list[str]]] = [
     ("10-follow-stream", (160, 46), ["slash", "@filter:proto:http", "enter", "@wait", "c", "@wait", "enter", "@wait"]),
     ("11-window-diff", (160, 46), ["w", "home", *["right"] * 4, "d", "end", "@wait"]),
     ("12-command-palette", (160, 46), ["ctrl+p", "@type:export"]),
+    # Live mode: follows a copy of the sample that holds only its first 60 % so far.
+    ("13-live-follow", (160, 46), ["@live", "p"]),
 ]
 
 
@@ -49,7 +51,14 @@ async def shoot(capture: Path, workdir: Path, name: str, size: tuple[int, int], 
     cfg = Config(db_path=workdir / f"{name}.db", export_dir=workdir / "exports")
     store = Store(cfg.db_path)
     session = Session(cfg, store, store.open_or_create("Sample investigation"))
-    app = TraceZeroApp(session, str(capture))
+    live = None
+    if "@live" in keys:
+        partial = workdir / "live-sensor.pcapng"
+        data = capture.read_bytes()
+        partial.write_bytes(data[: int(len(data) * 0.6)])
+        live = (str(partial), None)
+        keys = [k for k in keys if k != "@live"]
+    app = TraceZeroApp(session, None if live else str(capture), live)
     async with app.run_test(size=size) as pilot:
         while session.capture is None:
             await pilot.pause(0.05)

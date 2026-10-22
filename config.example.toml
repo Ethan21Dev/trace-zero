@@ -59,3 +59,6 @@ max_refs = 500
 # Optional offline reference data (never downloaded by TRACE//ZERO itself):
 # oui = "~/.local/share/trace-zero/oui.csv"          # python scripts/fetch_oui.py
 # geoip = ["~/GeoLite2-City.mmdb", "~/GeoLite2-ASN.mmdb"]
+# Live mode (F): capture tool used to record from an interface. Default: dumpcap, else tcpdump,
+# found on PATH (and in Program Files\Wireshark on Windows).
+# capture_tool = "/usr/bin/dumpcap"

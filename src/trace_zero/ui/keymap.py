@@ -11,6 +11,7 @@ KEYMAP: list[tuple[str, list[tuple[str, str]]]] = [
             ("ctrl+q", "quit immediately"),
             ("o", "open a PCAP / PCAPNG capture"),
             ("O", "add another capture to the timeline (multi-sensor)"),
+            ("F", "live: follow a growing capture file, or capture with dumpcap / tcpdump; F again stops"),
             ("/", "search and filter packets (up/down history, ctrl+s save, tab saved filters)"),
             ("ctrl+p", "command palette: every action, saved and recent filters"),
             ("esc", "close dialog / cancel import / clear selection, then filter"),

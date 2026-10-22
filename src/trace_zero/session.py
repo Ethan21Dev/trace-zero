@@ -17,6 +17,7 @@ from pathlib import Path
 from trace_zero.analysis.anomaly import Finding, detect
 from trace_zero import custody
 from trace_zero.cache import CaptureCache
+from trace_zero.live.model import LiveCapture, LiveUpdate
 from trace_zero.enrich import Enrichment
 from trace_zero.analysis.filters import PacketFilter, compile_filter, frames_filter
 from trace_zero.analysis.flows import Flow, build_flows
@@ -26,7 +27,7 @@ from trace_zero.config import Config
 from trace_zero.models import FileInfo, ParseResult
 from trace_zero.analysis.streams import Stream, reassemble
 from trace_zero.analysis.wireshark import to_wireshark
-from trace_zero.parsing.writer import export_sources
+from trace_zero.parsing.writer import export_sources, write_records
 from trace_zero.parsing.reader import CancelFn, CaptureError, ProgressFn, file_info, read_capture, read_frames, validate_capture_path
 from trace_zero.storage import Investigation, Store
 
@@ -225,6 +226,8 @@ class Session:
         self.selection: Selection | None = None
         # Chain-of-custody notes raised when the current capture was attached.
         self.custody_warnings: list[str] = []
+        # Live mode: the followed capture while it is still being written.
+        self.live: LiveCapture | None = None
         # Offline reference data (MAC vendors, geolocation/ASN) - optional, user-supplied files.
         self.enrichment, self.enrichment_problems = Enrichment.from_paths(config.oui_path, list(config.mmdb_paths))
 
@@ -257,6 +260,55 @@ class Session:
         )
         if loaded.findings:
             self.store.log(self.investigation.id, "analysis", f"{len(loaded.findings)} possible anomalies flagged by heuristics")
+
+    # -- live mode ---------------------------------------------------------------------
+    def start_live(self, live: LiveCapture) -> None:
+        self.live = live
+        self.store.log(self.investigation.id, "live", f"live mode started: {live.describe()}; provisional id {live.provisional_sha}")
+
+    def apply_live(self, update: LiveUpdate) -> None:
+        """Show a newer live snapshot, keeping filter, selection and timeline position.
+
+        A timeline cursor that was at the end keeps following the newest packets.
+        """
+        loaded, idx = update.loaded, update.loaded.index
+        first = self.capture is None or not self.capture.result.live
+        self.capture = loaded
+        self.view = update.view
+        if first or self.timeline is None:
+            self.filter = None
+            self.view = idx.view(None, key="")
+            self.timeline = Timeline.for_span(idx.t0, idx.t1)
+            self.selection = None
+            return
+        tl = self.timeline
+        following = tl.cursor >= tl.t1
+        tl.t0, tl.t1 = idx.t0, idx.t1
+        tl.cursor = idx.t1 if following else min(max(tl.cursor, idx.t0), idx.t1)
+
+    def finish_live(self, final: LoadedCapture) -> None:
+        """Replace the live snapshot with the offline analysis of the finished file.
+
+        Everything recorded under the provisional id moves to the file's real SHA-256.
+        """
+        live = self.live
+        self.live = None
+        moved = self.store.rekey_capture(self.investigation.id, live.provisional_sha, final.sha) if live else 0
+        flt_text = self.filter.text if self.filter is not None and self.filter.frame_set is None else ""
+        self.attach(final)
+        r = final.result
+        self.store.log(
+            self.investigation.id,
+            "live",
+            f"live capture finished: {r.file.name}, {len(r.packets):,} packets, sha256 {r.file.sha256}"
+            + (f"; {moved} item(s) moved from the provisional id" if moved else ""),
+        )
+        if flt_text:
+            try:
+                flt = self.compile(flt_text)
+                self.apply_view(flt, self.build_view(flt))
+            except Exception:  # noqa: BLE001 - the filter compiled before; never fail finalisation over it
+                pass
 
     @property
     def sha(self) -> str:
@@ -309,6 +361,8 @@ class Session:
     def frame_bytes(self, frames: set[int]) -> dict[int, tuple[bytes, int]]:
         """Re-read raw frames from the capture file(s). Safe in a worker thread."""
         assert self.capture is not None
+        if self.capture.result.live and self.live is not None:
+            return self.live.follower.frame_bytes(frames)
         out: dict[int, tuple[bytes, int]] = {}
         for info, offset, count in self.capture.result.source_list():
             local = {n - offset for n in frames if offset < n <= offset + count}
@@ -358,8 +412,14 @@ class Session:
             f"Exported by TRACE//ZERO from {', '.join(f'{i.name} (sha256 {i.sha256})' for i, _o, _c in r.source_list())}; "
             f"investigation '{self.investigation.name}'; selection: {expr or 'all packets'}"
         )
-        parts = [(info, frames, offset) for info, offset, _count in r.source_list()]
-        count = export_sources(parts, Path(path), comment)
+        if r.live and self.live is not None:
+            if Path(path).resolve() == self.live.path:
+                raise CaptureError("refusing to overwrite the source capture")
+            comment += "; exported during live capture (source still growing)"
+            count = write_records(self.live.follower.frame_records(frames), Path(path), comment)
+        else:
+            parts = [(info, frames, offset) for info, offset, _count in r.source_list()]
+            count = export_sources(parts, Path(path), comment)
         digest = custody.write_digest(path)
         if journal:
             self.journal_export(Path(path), digest, f"{count:,} packets; Wireshark filter: {expr or '(none)'}")

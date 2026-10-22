@@ -330,6 +330,7 @@ class ParseResult:
     stop_reason: str | None = None
     elapsed_s: float = 0.0
     cached: bool = False  # restored from the on-disk cache instead of parsed
+    live: bool = False  # snapshot of a capture that is still being written
     # Multi-capture timelines: (file, frame offset, frame count) per source. Empty = single file.
     sources: list[tuple[FileInfo, int, int]] = field(default_factory=list)
 

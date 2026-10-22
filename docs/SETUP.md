@@ -1,8 +1,9 @@
 # Setup guide
 
 TRACE//ZERO needs Python 3.11 or newer and a terminal with 256-colour or true-colour support and
-a Unicode monospace font. It reads capture files only, so no packet-capture driver, root or
-administrator rights are required.
+a Unicode monospace font. It reads capture files, so no packet-capture driver, root or
+administrator rights are required. Only optional live capture on an interface needs a capture
+tool with capture permission (see *Live capture permissions* below).
 
 Recommended terminal size: **160 x 45** or larger for the three-panel workspace. Between
 60 x 16 and 130 columns the interface switches to one panel at a time with tabs.
@@ -72,8 +73,9 @@ trace-zero --generate-sample sample.pcapng --format pcapng
 trace-zero sample.pcapng
 ```
 
-Npcap/WinPcap is **not** required. If scapy prints a notice about a missing libpcap provider
-during installation or import, it can be ignored: only offline file reading is used.
+Npcap/WinPcap is **not** required for analysing files. If scapy prints a notice about a missing
+libpcap provider during installation or import, it can be ignored: scapy is only used to read files.
+Live capture on an interface needs Wireshark with Npcap (see *Live capture permissions*).
 
 ### Windows Terminal settings
 
@@ -104,6 +106,25 @@ trace-zero --generate-sample /tmp/s.pcap && trace-zero /tmp/s.pcap --headless
 ```
 
 The headless run should report 3,324 packets, 18 hosts and 12 possible anomalies.
+
+## Live capture permissions
+
+TRACE//ZERO itself never needs elevated rights. Live capture on an interface (`F`, `--capture`)
+runs Wireshark's `dumpcap` or `tcpdump`, and **that tool** needs permission to capture:
+
+* **Debian / Ubuntu**: `sudo apt install wireshark-common` (or `tshark`), answer *Yes* to letting
+  non-superusers capture (or `sudo dpkg-reconfigure wireshark-common`), then
+  `sudo usermod -aG wireshark $USER` and log in again. `dumpcap -D` should then list interfaces.
+* **Fedora**: `sudo dnf install wireshark-cli`, then `sudo usermod -aG wireshark $USER`.
+* **Windows**: install Wireshark with **Npcap**. `dumpcap.exe` is found in
+  `C:\Program Files\Wireshark` automatically; `[paths] capture_tool` overrides the location.
+* **WSL**: capture inside WSL sees only WSL's own virtual network. To analyse the Windows host's
+  traffic, record it on Windows (Wireshark/dumpcap) into a file and follow that file from WSL
+  under `/mnt/c/...` - or run TRACE//ZERO natively on Windows.
+* **macOS**: Wireshark's *Install ChmodBPF* package grants capture access to your user.
+
+Following a file (`--follow`) needs only read access to it. If you prefer not to grant capture
+rights at all, start the capture tool however your organisation allows and follow its output.
 
 ## Optional reference data
 
