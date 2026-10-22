@@ -158,3 +158,18 @@ def test_every_documented_key_is_bound():
     for key in expected:
         name = {"esc": "escape"}.get(key, names.get(key, key))
         assert name in bound, f"documented key {key!r} has no binding"
+
+
+def test_example_config_documents_every_setting_with_its_default():
+    import dataclasses
+    import tomllib
+    from pathlib import Path
+
+    from trace_zero.config import AnomalyConfig, Limits
+
+    data = tomllib.loads((Path(__file__).resolve().parents[1] / "config.example.toml").read_text(encoding="utf-8"))
+    for section, cls in (("limits", Limits), ("anomaly", AnomalyConfig)):
+        documented = data[section]
+        for f in dataclasses.fields(cls):
+            assert f.name in documented, f"[{section}] {f.name} missing from config.example.toml"
+            assert documented[f.name] == getattr(cls(), f.name), f"[{section}] {f.name} differs from the default"

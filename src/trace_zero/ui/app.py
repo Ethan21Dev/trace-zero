@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from textual.app import App
 from textual.binding import Binding
+from textual.command import CommandPalette
 from textual.notifications import SeverityLevel
 
 from trace_zero import PRODUCT, TAGLINE
 from trace_zero.session import Session
-from trace_zero.ui.commands import WorkspaceCommands
+from trace_zero.ui.commands import TracePalette, WorkspaceCommands
 from trace_zero.ui.screens.main import MainScreen
 from trace_zero.ui.theme import TRACE_ZERO_THEME
 
@@ -32,6 +33,10 @@ class TraceZeroApp(App):
         """Notifications default to plain text: messages can carry file names, filter text or
         values derived from captures, which must never be interpreted as markup."""
         super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+
+    def action_command_palette(self) -> None:
+        if self.use_command_palette and not CommandPalette.is_open(self):
+            self.push_screen(TracePalette(id="--command-palette"))
 
     def get_default_screen(self) -> MainScreen:
         return MainScreen(self.session, self.initial_capture)

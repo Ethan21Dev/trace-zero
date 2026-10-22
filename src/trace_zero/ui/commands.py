@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import partial
 
 from rich.text import Text
-from textual.command import DiscoveryHit, Hit, Hits, Provider
+from textual.command import CommandPalette, DiscoveryHit, Hit, Hits, Provider, SearchIcon
 from textual.content import Content
 from textual.markup import escape
 
@@ -74,3 +74,14 @@ class WorkspaceCommands(Provider):
             if not title[offset].isspace():
                 content = content.stylize(matcher.match_style, offset, offset + 1)
         return content
+
+
+class TracePalette(CommandPalette):
+    """Textual's command palette with a plain prompt glyph (the default is an emoji)."""
+
+    DEFAULT_CSS = """
+    TracePalette SearchIcon { color: $accent; }
+    """
+
+    def on_mount(self) -> None:
+        self.query_one(SearchIcon).icon = ">"

@@ -1,6 +1,6 @@
 # Anomaly heuristics
 
-Each rule computes one transparent statistic over the capture. A finding is a **possible
+Ten rules each compute one transparent statistic over the capture. A finding is a **possible
 anomaly**: something worth an analyst's attention. No rule can establish intent, and every
 explanation lists benign causes that produce the same signature.
 
@@ -74,6 +74,80 @@ CV <= `pair_periodic_cv` with z >= `pair_periodic_z` (regular cadence). Needs at
 **Severity.** MEDIUM for regular cadence (automated check-ins: update agents, monitoring - or
 beaconing), LOW for volume only.
 **Confidence.** MEDIUM with >= 10 pairs in the baseline, LOW otherwise.
+
+## TZ-R6 - One IPv4 address claimed by several MAC addresses
+
+**Statistic.** For every ARP packet, the sender IPv4 address and sender hardware address. The
+number of distinct MACs announcing each IPv4 address, and how many times the claimant switched.
+
+**Fires when** two or more MACs claim the same address (`0.0.0.0` probes are ignored).
+
+**Severity.** MEDIUM; HIGH when the claimant switched three or more times (a tug of war).
+**Confidence.** MEDIUM: the ARP fields are observed directly, but VRRP/HSRP failover, bonded NICs
+and replaced hardware produce the same packets legitimately.
+
+## TZ-R7 - DNS responses without a matching query
+
+**Statistic.** Each DNS response (port 53) is matched to a query by client address and port,
+server address and port, and transaction ID. Responses with no matching query, and duplicate
+responses to one query whose answers differ from the first response, are counted per client.
+
+**Fires when** a client has >= `dns_unsolicited_min` unmatched responses (default 1), or any
+conflicting duplicate. Responses in the first `dns_startup_grace_s` seconds (default 1) are
+ignored because their query may predate the capture, and clients whose queries never appear
+at all (one-sided capture) are skipped.
+
+**Severity.** HIGH when conflicting answers were seen, otherwise MEDIUM.
+**Confidence.** MEDIUM with conflicts or three or more unmatched responses, LOW otherwise.
+
+## TZ-R8 - Heavy outbound transfer
+
+**Statistic.** Bytes on the wire per directed pair over the whole capture, for pairs from an
+internal address (RFC 1918, IPv6 ULA, link-local, loopback) to an external one (public and
+documentation ranges).
+
+**Fires when** the internal host sent >= `outbound_min_bytes` (default 500 KB) and at least
+`outbound_ratio` (default 5) times what it received from that peer.
+
+**Severity.** LOW; MEDIUM from four times the byte threshold.
+**Confidence.** MEDIUM: byte counts are exact, but "internal" and "external" are judged from
+address ranges only. Backups, uploads and video calls look the same.
+
+## TZ-R9 - New external destinations late in the capture
+
+**Statistic.** The capture is split at `max(late_fraction x duration, late_min_baseline_s)`
+(defaults 50 % and 60 s). External hosts first observed after the split, contacted by an
+internal host with at least `late_min_bytes` (default 5 KB) exchanged, are grouped per
+internal host.
+
+**Severity.** LOW - this marks where a host's external footprint changed, nothing more.
+**Confidence.** MEDIUM when the baseline is at least 10 minutes, LOW otherwise.
+
+## TZ-R10 - TLS server name does not match observed DNS answers
+
+**Statistic.** Every A/AAAA answer in the capture, per name; every TLS ClientHello's SNI and
+destination address.
+
+**Fires when** a ClientHello names a server that DNS in the capture resolved, but goes to an
+address none of those answers contained.
+
+**Severity.** MEDIUM.
+**Confidence.** MEDIUM: lookups made before the capture, through another resolver or over
+DNS-over-HTTPS are invisible here. CDNs, hard-coded addresses and stale caches cause this; so do
+domain fronting and traffic avoiding the local resolver.
+
+## Triage and suppression
+
+Heuristics are noisy by nature, so findings carry an analyst status:
+
+* `T` on a finding sets **open**, **benign** or **escalated**, with a reason. Status is stored per
+  investigation and capture, appears in the findings list, the inspector and both exports, and
+  is journaled.
+* `z` creates a **suppression rule** from the selected finding: the rule ID plus, optionally, a
+  host. Matching findings are hidden from the list, the timeline markers and event stepping, in
+  this and future captures of the investigation. A reason is required. `Z` shows suppressed
+  findings again (marked as such); suppressions are listed in the journal (`delete` removes one)
+  and exported with their reasons, so nothing disappears silently from a report.
 
 ## Inspecting evidence
 

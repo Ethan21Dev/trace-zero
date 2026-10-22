@@ -7,6 +7,12 @@ administrator rights are required.
 Recommended terminal size: **160 x 45** or larger for the three-panel workspace. Between
 60 x 16 and 130 columns the interface switches to one panel at a time with tabs.
 
+## Standalone executable or PyPI
+
+Tagged releases provide single-file executables (Linux x86-64, Windows x86-64, macOS arm64)
+with a `SHA256SUMS` file, and the `trace-zero` package on PyPI (`pipx install trace-zero`).
+Neither needs a source checkout. The sections below install from source.
+
 ## Linux
 
 ```bash
@@ -85,6 +91,8 @@ during installation or import, it can be ignored: only offline file reading is u
 | Error log (local only) | `~/.local/share/trace-zero/trace-zero.log` | `%LOCALAPPDATA%\trace-zero\trace-zero.log` |
 | Configuration | `~/.config/trace-zero/config.toml` | `%APPDATA%\trace-zero\config.toml` |
 | Default export folder | `~/trace-zero-exports` | `%USERPROFILE%\trace-zero-exports` |
+| Parsed-capture cache | `~/.local/share/trace-zero/cache/` | `%LOCALAPPDATA%\trace-zero\cache\` |
+| MAC vendor list (optional) | `~/.local/share/trace-zero/oui.csv` | `%LOCALAPPDATA%\trace-zero\oui.csv` |
 
 `TRACE_ZERO_HOME` overrides the data directory; `--db` and `--config` override individual files.
 
@@ -95,4 +103,14 @@ python -m pytest -q
 trace-zero --generate-sample /tmp/s.pcap && trace-zero /tmp/s.pcap --headless
 ```
 
-The headless run should report 2,608 packets, 14 hosts and six possible anomalies.
+The headless run should report 3,324 packets, 18 hosts and 12 possible anomalies.
+
+## Optional reference data
+
+* **MAC vendors.** `python scripts/fetch_oui.py` downloads the IEEE registry once into the data
+  directory (the only network access in the project, and only when you run it). A Wireshark
+  `manuf` file also works. Point TRACE//ZERO at it with `--oui` or `[paths] oui`.
+* **GeoIP / ASN.** Download GeoLite2 City/Country/ASN `.mmdb` files from MaxMind (free account)
+  and pass them with `--geoip` (repeatable) or `[paths] geoip`.
+
+Problems loading either file are reported at startup and never stop the application.

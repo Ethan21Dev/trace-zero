@@ -9,7 +9,7 @@
 
 [limits]
 max_file_mb = 1024        # captures larger than this are refused before parsing
-max_packets = 1000000     # import stops here and the capture is flagged TRUNCATED (~0.7 KB RAM per packet)
+max_packets = 1000000     # import stops here and the capture is flagged TRUNCATED (~1.1 KB RAM per packet)
 batch_size = 5000         # packets per progress update / cancellation check
 max_raw_bytes = 65535     # cap for the raw-bytes view of one packet
 max_dns_payload = 4096    # larger DNS payloads are not decoded
@@ -38,6 +38,17 @@ pair_min_contacts = 20
 pair_z = 5.0
 pair_periodic_z = 2.0
 pair_periodic_cv = 0.25
+# TZ-R6 (ARP: one IPv4 address, several MACs) and TZ-R10 (SNI vs DNS answers) have no thresholds.
+# TZ-R7 DNS responses without a matching query
+dns_unsolicited_min = 1
+dns_startup_grace_s = 1.0   # unmatched responses this early may answer a query sent before the capture
+# TZ-R8 heavy outbound transfer (internal -> external)
+outbound_min_bytes = 500000
+outbound_ratio = 5.0
+# TZ-R9 new external destinations late in the capture
+late_fraction = 0.5         # "late" = after this share of the capture ...
+late_min_baseline_s = 60.0  # ... and after at least this many seconds
+late_min_bytes = 5000
 # supporting frame references stored per finding
 max_refs = 500
 

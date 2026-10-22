@@ -9,9 +9,11 @@
 | `compressed (gzip) captures are not supported` | Decompress first: `gunzip capture.pcap.gz`. |
 | `file is N MB; the configured limit is ...` | Raise `[limits] max_file_mb` in the config, or split the capture: `editcap -c 500000 big.pcap part.pcap`. |
 | `path is not a regular file` | Devices, FIFOs and sockets are refused by design; save the capture to a file first. |
-| `TRUNCATED - packet limit reached` | Import stopped at `[limits] max_packets`. Everything shown covers only the imported part. Raise the limit (about 0.7 KB of RAM per packet) or split the file. |
+| `TRUNCATED - packet limit reached` | Import stopped at `[limits] max_packets`. Everything shown covers only the imported part. Raise the limit (about 1.1 KB of RAM per packet) or split the file. |
 | `TRUNCATED - file ends mid-record` / `damaged capture` | The file was cut off or corrupted. All packets before the damage are available; the warning names the byte offset. |
 | `capture file changed on disk since import` (raw bytes) | Raw bytes are re-read from disk, and the file's size or modification time no longer matches. Re-open the capture. |
+| `... changed on disk since import; re-open it before exporting` | Packet export copies frames from the original file, which no longer matches what was imported. Re-open it (and consider why it changed). |
+| `combined captures hold N packets; the limit is ...` | Merged captures count against `[limits] max_packets` together. |
 | `packet(s) carry no timestamp (pcapng simple packet blocks)` | The capture uses SPBs, which have no timestamps. Those packets are ordered after the previous packet and flagged. |
 
 Many frames shown in amber with `[...]` in the info column: those frames have decode issues
@@ -48,9 +50,36 @@ Many frames shown in amber with `[...]` in the info column: those frames have de
 * Bookmarks and notes are tied to the capture's SHA-256. If a capture is modified (even
   re-saved), it is a different piece of evidence and starts without bookmarks.
 
+## Chain of custody
+
+* **`CHAIN OF CUSTODY` warning when opening a capture** - this path was imported before with a
+  different SHA-256: the file changed (re-saved, truncated, replaced). Treat the two versions as
+  different evidence. Both hashes are in the journal and the report.
+* **`V` reports `MISMATCH`** - the file on disk differs from the bytes that were analysed.
+  **`UNAVAILABLE`** - it was moved, deleted or is unreadable. `trace-zero -i NAME --verify` checks
+  every capture of an investigation from the command line (exit code 3 on any problem).
+* **Checking an export later** - `sha256sum -c report.json.sha256` (Linux/WSL) or
+  `Get-FileHash report.json` (PowerShell) against the sidecar and the journal entry.
+
+## Cache
+
+* **Reopening is not faster** - the cache is keyed by content hash and limits; changing
+  `[limits]` or upgrading TRACE//ZERO invalidates it. Hashing still reads the whole file.
+* **Disk usage** - capped by `[limits] cache_max_mb` (least recently used entries go first);
+  `trace-zero --clear-cache` empties it, `--no-cache` bypasses it for one run.
+* A damaged cache entry fails its checksum and is silently re-parsed from the capture.
+
+## Reference data
+
+* **`reference data not loaded` at startup** (headless: `warning: reference data: ...`) - the OUI or MMDB file could not be read or is
+  not the expected format. Re-download it; TRACE//ZERO runs without it.
+* **No country/ASN for internal hosts** - by design: lookups only run for public and
+  documentation-range addresses.
+
 ## Performance
 
-* Import runs at roughly 20-30k packets/s; progress is shown in the header and `esc` cancels.
+* First import runs at roughly 17-30k packets/s (including detection and flows); progress is
+  shown in the header and `esc` cancels. Reopening a cached capture is about 10x faster.
 * Filtering large captures runs in the background (status `FILTERING`).
 * Sorting the packet list by a non-time column re-sorts on every timeline change; return to time
   order (`s` until `sort:time`) while replaying very large windows.

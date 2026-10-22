@@ -38,6 +38,10 @@ SHOTS: list[tuple[str, tuple[int, int], list[str]]] = [
     ("06-journal", (160, 46), ["f", "down", "m", "a", "@note", "b", "down", "down", "down"]),
     ("07-compact-100x32", (100, 32), ["p"]),
     ("08-help", (120, 40), ["question_mark"]),
+    ("09-flows", (160, 46), ["c", "@wait", "down", "down", "down"]),
+    ("10-follow-stream", (160, 46), ["slash", "@filter:proto:http", "enter", "@wait", "c", "@wait", "enter", "@wait"]),
+    ("11-window-diff", (160, 46), ["w", "home", *["right"] * 4, "d", "end", "@wait"]),
+    ("12-command-palette", (160, 46), ["ctrl+p", "@type:export"]),
 ]
 
 
@@ -55,6 +59,9 @@ async def shoot(capture: Path, workdir: Path, name: str, size: tuple[int, int], 
             if key == "@wait":
                 await app.workers.wait_for_complete()
                 await pilot.pause(0.2)
+            elif key.startswith("@type:"):
+                await pilot.press(*key.split(":", 1)[1])
+                await pilot.pause(0.5)
             elif key.startswith("@filter:"):
                 app.screen.query_one("Input").value = key.split(":", 1)[1]
             elif key == "@note":

@@ -649,6 +649,9 @@ async def test_command_palette_runs_actions_and_saved_filters(tmp_path, sample_p
         await pilot.press("ctrl+p")
         await pilot.pause()
         assert isinstance(app.screen, CommandPalette)
+        from textual.command import SearchIcon
+
+        assert app.screen.query_one(SearchIcon).icon == ">"  # no emoji in the interface
         await pilot.press(*"flows")
         await pilot.pause(0.5)
         await pilot.press("enter")
