@@ -29,6 +29,7 @@ from trace_zero.export import export_all
 from trace_zero.config import default_data_dir
 from trace_zero.export.report import slug
 from trace_zero.live import CaptureProcess, CaptureToolError, LiveCapture, find_tool, list_interfaces
+from trace_zero.live.route import detect_default_routes, mark_connected
 from trace_zero.live.tool import validate_filter
 from trace_zero.models import fmt_bytes, fmt_duration, fmt_rel, fmt_ts
 from trace_zero.parsing.reader import CaptureError, ParseCancelled, validate_capture_path
@@ -1705,6 +1706,8 @@ class MainScreen(Screen):
             interfaces, error = list_interfaces(tool), None
         except CaptureToolError as exc:
             interfaces, error = [], str(exc)
+        if interfaces:
+            interfaces = mark_connected(interfaces, detect_default_routes())
         self.app.call_from_thread(self._interfaces_listed, tool, interfaces, error)
 
     def _interfaces_listed(self, tool, interfaces, error: str | None) -> None:

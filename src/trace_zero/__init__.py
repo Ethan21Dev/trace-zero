@@ -3,6 +3,6 @@
 EVERY PACKET LEAVES A TRACE.
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 PRODUCT = "TRACE//ZERO"
 TAGLINE = "EVERY PACKET LEAVES A TRACE."

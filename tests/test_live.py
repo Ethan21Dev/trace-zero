@@ -549,3 +549,89 @@ async def test_interface_picker_shows_full_names_and_returns_the_device(tmp_path
         await pilot.pause()
     assert chosen == ["\\Device\\NPF_{9F8E7D6C-3333-4E3B-9F1A-2C3D4E5F6A7B}"]
     store.close()
+
+
+# -- which adapter is connected ------------------------------------------------------------
+def test_default_route_parsers():
+    from trace_zero.live.route import parse_macos_route, parse_proc_net_route, parse_windows
+
+    one = '{"Alias":"Wi-Fi","Guid":"{9f8e7d6c-3333-4e3b-9f1a-2c3d4e5f6a7b}","IPv4":["192.168.1.23"]}'
+    routes = parse_windows(one)
+    assert routes[0].name == "Wi-Fi" and routes[0].guid == "{9F8E7D6C-3333-4E3B-9F1A-2C3D4E5F6A7B}"
+    assert routes[0].addresses == ("192.168.1.23",)
+    two = '[{"Alias":"Ethernet 2","Guid":"11223344-4444-4e3b-9f1a-2c3d4e5f6a7b","IPv4":"10.0.0.5"},{"Alias":"Wi-Fi","Guid":"","IPv4":[]}]'
+    assert [(r.name, r.guid, r.addresses) for r in parse_windows(two)] == [
+        ("Ethernet 2", "{11223344-4444-4E3B-9F1A-2C3D4E5F6A7B}", ("10.0.0.5",)),
+        ("Wi-Fi", "", ()),
+    ]
+    assert parse_windows("") == [] and parse_windows("not json") == []
+    table = (
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        "eth0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"
+        "wlan0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+        "wlan0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
+        "tun0\t00000000\t00000000\t0000\t0\t0\t50\t00000000\t0\t0\t0\n"
+    )
+    assert parse_proc_net_route(table) == ["wlan0", "eth0"]  # lowest metric first; routes that are down ignored
+    assert parse_macos_route("   route to: default\ndestination: default\n  interface: en0\n") == "en0"
+
+
+def test_connected_adapter_is_matched_by_guid_or_name():
+    from trace_zero.live.route import DefaultRoute, mark_connected
+
+    ifaces = parse_interface_list(WINDOWS_D)
+    marked = mark_connected(ifaces, [DefaultRoute("Wi-Fi", "{9F8E7D6C-3333-4E3B-9F1A-2C3D4E5F6A7B}", ("192.168.1.23",))])
+    assert [i.friendly for i in marked if i.connected] == ["Wi-Fi"]
+    assert next(i for i in marked if i.connected).addresses == ("192.168.1.23",)
+    by_name = mark_connected(ifaces, [DefaultRoute("Ethernet 2")])
+    assert [i.friendly for i in by_name if i.connected] == ["Ethernet 2"]
+    linux = mark_connected(parse_interface_list(TCPDUMP_D), [DefaultRoute("eth0", "", ("10.1.2.3",))])
+    assert [i.name for i in linux if i.connected] == ["eth0"]
+    assert mark_connected(ifaces, []) == ifaces
+
+
+async def test_picker_puts_the_connected_adapter_first_and_selected(tmp_path, monkeypatch):
+    import trace_zero.ui.screens.main as main_mod
+    from trace_zero.live.route import DefaultRoute
+    from trace_zero.ui.screens.dialogs import ChoiceScreen, InterfaceScreen
+
+    # Ethernet 2 is the connected one here, so it must beat Wi-Fi to the top.
+    monkeypatch.setattr(main_mod, "find_tool", lambda configured=None: CaptureTool("dumpcap", "dumpcap"))
+    monkeypatch.setattr(main_mod, "list_interfaces", lambda tool: parse_interface_list(WINDOWS_D))
+    monkeypatch.setattr(main_mod, "detect_default_routes", lambda: [DefaultRoute("Ethernet 2", "{11223344-4444-4E3B-9F1A-2C3D4E5F6A7B}", ("10.0.0.5",))])
+    chosen = []
+    app, s, store = _app(tmp_path)
+    async with app.run_test(size=(120, 30)) as pilot:
+        main = app.main
+        monkeypatch.setattr(main, "_ask_capture_filter", lambda tool, name: chosen.append(name))
+        await pilot.press("F")
+        assert isinstance(app.screen, ChoiceScreen)
+        await pilot.press("c")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, InterfaceScreen) and screen.found_connected
+        assert screen.interfaces[0].friendly == "Ethernet 2"
+        text = app.export_screenshot()
+        assert "CONNECTED&#160;10.0.0.5" in text
+        assert "this computer is 10.0.0.5" in str(screen.query_one("#detail").render())
+        await pilot.press("enter")  # the pre-selected (connected) adapter
+        await pilot.pause()
+    assert chosen == ["\\Device\\NPF_{11223344-4444-4E3B-9F1A-2C3D4E5F6A7B}"]
+    store.close()
+
+
+@pytest.mark.skipif(sys.platform not in ("win32", "linux"), reason="checked on the CI platforms")
+def test_real_default_route_detection():
+    """Runs the real lookup (PowerShell on Windows, /proc/net/route on Linux); CI machines have a default route."""
+    from trace_zero.live.route import detect_default_routes
+
+    routes = detect_default_routes()
+    if not routes:
+        # GitHub's runners are always online: an empty result there means the lookup is broken.
+        assert not os.environ.get("GITHUB_ACTIONS"), "default route detection returned nothing on CI"
+        pytest.skip("this machine has no default route")
+    assert routes[0].name
+    assert all(addr.count(".") == 3 for addr in routes[0].addresses)
+    if sys.platform == "win32":
+        assert routes[0].guid.startswith("{") and routes[0].guid.endswith("}"), routes

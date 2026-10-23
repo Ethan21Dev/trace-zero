@@ -78,6 +78,7 @@ Many frames shown in amber with `[...]` in the info column: those frames have de
 | `no capture tool found` | Install Wireshark (`dumpcap`) or `tcpdump`, or set `[paths] capture_tool`. Following a file needs neither. |
 | `dumpcap listed no capture interfaces ...` / `exited with code ...` | The tool may not capture: see SETUP.md, *Live capture permissions*. The tool's own messages are in `capture-tool.log` in the data directory. |
 | `does not list interface 'X'` | Use a name from `trace-zero --list-interfaces`. |
+| Which adapter is mine? | Every adapter listed belongs to this computer, and only this computer's traffic is recorded. The one marked **CONNECTED** (with this computer's IP address) carries the route to the internet and is pre-selected. If none is marked, run `ipconfig` (Windows) and pick the adapter that has a *Default Gateway*. |
 | `file shrank ... following stopped` | The file was rotated, truncated or overwritten. Ring-buffer captures are not followed; capture into a single file. |
 | `invalid PCAPNG block length ...` / `capture damaged` | The writer produced something that is not a valid capture. Following stops; packets read until then remain. |
 | `LIVE waiting for packets` never changes | The writer buffers output. Use `tcpdump -U` (TRACE//ZERO does when it starts tcpdump), or check the capture filter. |

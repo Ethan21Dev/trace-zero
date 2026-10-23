@@ -422,20 +422,29 @@ class InterfaceScreen(ModalScreen[str | None]):
     def __init__(self, tool_kind: str, interfaces: list) -> None:
         super().__init__()
         self.tool_kind = tool_kind
-        # The adapters people actually capture on first; otherwise the tool's own order.
+        # The adapter carrying the default route first, then the ones people usually capture on.
         likely = ("wi-fi", "wifi", "wlan", "wireless", "ethernet", "eth", "en0", "en1", "wl")
-        self.interfaces = sorted(interfaces, key=lambda i: not i.friendly.lower().startswith(likely))
+        self.interfaces = sorted(interfaces, key=lambda i: (not getattr(i, "connected", False), not i.friendly.lower().startswith(likely)))
+        self.found_connected = any(getattr(i, "connected", False) for i in self.interfaces)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="frame") as frame:
             frame.border_title = f"CAPTURE WITH {self.tool_kind.upper()}"
+            if self.found_connected:
+                hint = (
+                    "The adapter marked CONNECTED is the one this computer uses to reach the internet: "
+                    "press enter to capture on it. "
+                )
+            else:
+                hint = "Pick the adapter you use to reach the network - usually Wi-Fi or Ethernet. "
             yield Static(
-                "Pick the adapter you use to reach the network - usually Wi-Fi or Ethernet. "
-                "Only traffic to and from this computer (plus broadcast/multicast) is recorded.",
+                hint + "Only traffic to and from this computer (plus broadcast/multicast) is recorded.",
                 classes="hint",
                 markup=False,
             )
-            yield VirtualTable([Col("KEY", 4), Col("ADAPTER", min_width=24), Col("DEVICE NAME", min_width=20)], id="interfaces")
+            yield VirtualTable(
+                [Col("KEY", 4), Col("ADAPTER", min_width=20), Col("STATUS", 26), Col("DEVICE NAME", min_width=16)], id="interfaces"
+            )
             yield Static("", id="detail", classes="hint", markup=False)
             yield Static("up/down choose  \u2502  enter or key capture on it  \u2502  esc cancel", classes="hint")
 
@@ -447,7 +456,17 @@ class InterfaceScreen(ModalScreen[str | None]):
         def row(i: int) -> list:
             friendly = ifaces[i].friendly
             device = ifaces[i].name if friendly != ifaces[i].name else ""
-            return [Text(keys[i] if i < len(keys) else "", style=theme.S_CYAN), Text(clean(friendly, 120), style=theme.S_TEXT), Text(clean(device, 120), style=theme.S_DIM)]
+            iface = ifaces[i]
+            if getattr(iface, "connected", False):
+                status = Text("CONNECTED " + clean(" ".join(iface.addresses[:1]), 40), style=theme.S_GREEN)
+            else:
+                status = Text("")
+            return [
+                Text(keys[i] if i < len(keys) else "", style=theme.S_CYAN),
+                Text(clean(friendly, 120), style=theme.S_TEXT),
+                status,
+                Text(clean(device, 120), style=theme.S_DIM),
+            ]
 
         table.set_data(len(ifaces), row, lambda i: i, notify=False)
         table.styles.height = min(len(ifaces), 20) + 1
@@ -458,7 +477,10 @@ class InterfaceScreen(ModalScreen[str | None]):
         if i is None or not 0 <= i < len(self.interfaces):
             return
         iface = self.interfaces[i]
-        self.query_one("#detail", Static).update(clean(f"selected: {iface.friendly}  -  {iface.name}", 300))
+        extra = ""
+        if getattr(iface, "connected", False):
+            extra = "  -  connected" + (f", this computer is {', '.join(iface.addresses)}" if iface.addresses else "")
+        self.query_one("#detail", Static).update(clean(f"selected: {iface.friendly}  -  {iface.name}{extra}", 300))
 
     @on(VirtualTable.Highlighted)
     def highlighted(self, event: VirtualTable.Highlighted) -> None:

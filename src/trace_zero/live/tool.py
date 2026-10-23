@@ -51,6 +51,8 @@ class CaptureTool:
 class Interface:
     name: str
     description: str
+    connected: bool = False  # carries this computer's default route (see live.route)
+    addresses: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
