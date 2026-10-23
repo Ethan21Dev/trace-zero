@@ -21,6 +21,7 @@ from trace_zero.live.tool import (
     CaptureProcess,
     CaptureTool,
     CaptureToolError,
+    Interface,
     build_command,
     find_tool,
     list_interfaces,
@@ -629,9 +630,69 @@ def test_real_default_route_detection():
     routes = detect_default_routes()
     if not routes:
         # GitHub's runners are always online: an empty result there means the lookup is broken.
-        assert not os.environ.get("GITHUB_ACTIONS"), "default route detection returned nothing on CI"
+        assert not os.environ.get("GITHUB_ACTIONS"), f"default route detection returned nothing on CI: {_route_diagnostics()}"
         pytest.skip("this machine has no default route")
     assert routes[0].name
     assert all(addr.count(".") == 3 for addr in routes[0].addresses)
-    if sys.platform == "win32":
-        assert routes[0].guid.startswith("{") and routes[0].guid.endswith("}"), routes
+    if sys.platform == "win32" and os.environ.get("GITHUB_ACTIONS"):
+        from trace_zero.live.route import windows_ipconfig, windows_powershell
+
+        ps = windows_powershell()
+        assert ps and ps[0].guid.startswith("{") and ps[0].addresses, f"PowerShell lookup: {ps} {_route_diagnostics()}"
+        ipc = windows_ipconfig()
+        assert ipc and ipc[0].addresses == ps[0].addresses[:1], f"ipconfig fallback: {ipc} vs {ps}"
+        assert ipc[0].name.endswith(ps[0].name), (ipc, ps)  # the heading names the same adapter
+
+
+def _route_diagnostics() -> str:
+    """What the platform tools actually printed, to make a CI failure self-explanatory."""
+    import subprocess
+
+    from trace_zero.live import route
+
+    if sys.platform != "win32":
+        return ""
+    proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", route._WINDOWS_SCRIPT], capture_output=True, text=True, timeout=30)
+    return f"exit={proc.returncode} stdout={proc.stdout[:800]!r} stderr={proc.stderr[:800]!r} source={route._source_address()}"
+
+
+
+IPCONFIG_EN = """
+Windows IP Configuration
+
+
+Ethernet adapter Ethernet 2:
+
+   Media State . . . . . . . . . . . : Media disconnected
+   Connection-specific DNS Suffix  . :
+
+Wireless LAN adapter Wi-Fi:
+
+   Connection-specific DNS Suffix  . : attlocal.net
+   IPv4 Address. . . . . . . . . . . : 192.168.1.23(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Default Gateway . . . . . . . . . : 192.168.1.254
+"""
+IPCONFIG_DE = """
+Windows-IP-Konfiguration
+
+Drahtlos-LAN-Adapter WLAN:
+
+   IPv4-Adresse  . . . . . . . . . . : 192.168.1.23
+   Standardgateway . . . . . . . . . : 192.168.1.254
+"""
+
+
+def test_ipconfig_fallback_finds_the_adapter_by_address_in_any_language():
+    from trace_zero.live.route import mark_connected, parse_ipconfig
+
+    en = parse_ipconfig(IPCONFIG_EN, "192.168.1.23")
+    assert [(r.name, r.addresses) for r in en] == [("Wireless LAN adapter Wi-Fi", ("192.168.1.23",))]
+    assert parse_ipconfig(IPCONFIG_EN, "192.168.1.2") == []  # no partial-number matches
+    assert parse_ipconfig(IPCONFIG_EN, None) == []
+    marked = mark_connected(parse_interface_list(WINDOWS_D), en)
+    assert [i.friendly for i in marked if i.connected] == ["Wi-Fi"]
+    de = parse_ipconfig(IPCONFIG_DE, "192.168.1.23")
+    assert de[0].name == "Drahtlos-LAN-Adapter WLAN"
+    wlan = [Interface("\\Device\\NPF_{AA}", "(WLAN)")]
+    assert mark_connected(wlan, de)[0].connected

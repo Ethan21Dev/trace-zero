@@ -4,9 +4,11 @@ Used to pre-select the right interface for live capture. Everything here is a
 local lookup of the operating system's own configuration - the routing
 table - and never sends a packet:
 
-* Windows: PowerShell ``Get-NetIPConfiguration`` (adapters with a default
-  gateway, their alias, interface GUID and IPv4 addresses). The GUID is the one
-  in dumpcap's ``\\Device\\NPF_{GUID}`` names.
+* Windows: PowerShell ``Get-NetRoute`` for the default route, then that
+  route's adapter (name, interface GUID) and IPv4 addresses. The GUID is the one
+  in dumpcap's ``\\Device\\NPF_{GUID}`` names. If PowerShell is unavailable,
+  ``ipconfig`` is read instead: the section holding this computer's source
+  address names the adapter.
 * Linux: ``/proc/net/route`` (the default route's device).
 * macOS: ``route -n get default`` and ``ipconfig getifaddr``.
 
@@ -26,10 +28,15 @@ from pathlib import Path
 
 from trace_zero.live.tool import Interface
 
+# Default IPv4 routes, best (lowest metric) first, with their adapter's name, GUID and addresses.
+# Errors about unrelated virtual adapters are silenced; they must not hide the answer.
 _WINDOWS_SCRIPT = (
-    "Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | "
-    "ForEach-Object { [pscustomobject]@{ Alias = $_.InterfaceAlias; Guid = [string]$_.NetAdapter.InterfaceGuid; "
-    "IPv4 = @($_.IPv4Address | ForEach-Object { $_.IPAddress }) } } | ConvertTo-Json -Compress"
+    "$ErrorActionPreference = 'SilentlyContinue'; "
+    "@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | "
+    "ForEach-Object { $i = $_.InterfaceIndex; $a = Get-NetAdapter -InterfaceIndex $i; "
+    "if ($a) { [pscustomobject]@{ Alias = $a.Name; Guid = [string]$a.InterfaceGuid; "
+    "IPv4 = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 | ForEach-Object { $_.IPAddress }) } } }) "
+    "| ConvertTo-Json -Compress"
 )
 
 
@@ -63,6 +70,20 @@ def parse_windows(text: str) -> list[DefaultRoute]:
     return out
 
 
+def parse_ipconfig(text: str, source_address: str | None) -> list[DefaultRoute]:
+    """The ``ipconfig`` section that holds ``source_address``. Labels are localised, so only the
+    unindented section heading and the address itself are used."""
+    if not source_address:
+        return []
+    heading = None
+    for line in text.splitlines():
+        if line and not line[0].isspace() and line.rstrip().endswith(":"):
+            heading = line.rstrip()[:-1].strip()
+        elif heading and re.search(r"(?<![\d.])" + re.escape(source_address) + r"(?![\d.])", line):
+            return [DefaultRoute(heading, "", (source_address,))]
+    return []
+
+
 def parse_proc_net_route(text: str) -> list[str]:
     """Devices with a default route (destination 0.0.0.0, mask 0, route up), lowest metric first."""
     found: list[tuple[int, str]] = []
@@ -93,7 +114,16 @@ def _run(cmd: list[str], timeout: float) -> str:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, check=False, **kwargs)
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    return proc.stdout if proc.returncode == 0 else ""
+    # Keep the output even with a non-zero exit: PowerShell sets one for errors about other adapters.
+    return proc.stdout or ""
+
+
+def windows_powershell(timeout: float = 8.0) -> list[DefaultRoute]:
+    return parse_windows(_run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_SCRIPT], timeout))
+
+
+def windows_ipconfig(timeout: float = 8.0) -> list[DefaultRoute]:
+    return parse_ipconfig(_run(["ipconfig"], timeout), _source_address())
 
 
 def _source_address() -> str | None:
@@ -110,7 +140,7 @@ def detect_default_routes(timeout: float = 8.0) -> list[DefaultRoute]:
     """Adapters this computer uses to reach the internet. Never raises."""
     try:
         if sys.platform == "win32":
-            return parse_windows(_run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_SCRIPT], timeout))
+            return windows_powershell(timeout) or windows_ipconfig(timeout)
         if sys.platform == "darwin":
             dev = parse_macos_route(_run(["route", "-n", "get", "default"], timeout))
             if not dev:
@@ -135,6 +165,8 @@ def mark_connected(interfaces: list[Interface], routes: list[DefaultRoute]) -> l
             if route.guid and route.guid in iface.name.upper():
                 match = route
             elif route.name and (route.name == iface.name or route.name == iface.friendly):
+                match = route
+            elif route.name.endswith(" " + iface.friendly):  # ipconfig heading: "Wireless LAN adapter Wi-Fi"
                 match = route
             if match:
                 break
