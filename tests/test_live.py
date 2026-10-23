@@ -504,3 +504,48 @@ async def test_follow_browser_accepts_a_file_that_is_still_empty(tmp_path):
         app.main.stop_live("test over")
         await _until(pilot, lambda: s.live is None)
     store.close()
+
+
+WINDOWS_D = """1. \\Device\\NPF_{0A1B2C3D-1111-4E3B-9F1A-2C3D4E5F6A7B} (Local Area Connection* 9)
+2. \\Device\\NPF_{6B4C2A7E-2222-4E3B-9F1A-2C3D4E5F6A7B} (WAN Miniport (IPv6))
+3. \\Device\\NPF_{9F8E7D6C-3333-4E3B-9F1A-2C3D4E5F6A7B} (Wi-Fi)
+4. \\Device\\NPF_{11223344-4444-4E3B-9F1A-2C3D4E5F6A7B} (Ethernet 2)
+5. \\Device\\NPF_Loopback (Adapter for loopback traffic capture)
+6. etwdump (Event Tracing for Windows (ETW) reader)
+"""
+
+
+def test_windows_interface_names_are_friendly():
+    ifaces = parse_interface_list(WINDOWS_D)
+    assert [i.friendly for i in ifaces] == [
+        "Local Area Connection* 9",
+        "WAN Miniport (IPv6)",
+        "Wi-Fi",
+        "Ethernet 2",
+        "Adapter for loopback traffic capture",
+        "Event Tracing for Windows (ETW) reader",
+    ]
+    assert ifaces[2].name == "\\Device\\NPF_{9F8E7D6C-3333-4E3B-9F1A-2C3D4E5F6A7B}"
+    assert parse_interface_list("1. eth0\n")[0].friendly == "eth0"
+
+
+async def test_interface_picker_shows_full_names_and_returns_the_device(tmp_path):
+    from trace_zero.ui.screens.dialogs import InterfaceScreen
+
+    app, s, store = _app(tmp_path)
+    chosen = []
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.push_screen(InterfaceScreen("dumpcap", parse_interface_list(WINDOWS_D)), chosen.append)
+        await pilot.pause()
+        screen = app.screen
+        # Wi-Fi and Ethernet are listed first, under hotkeys 1 and 2
+        assert [i.friendly for i in screen.interfaces[:2]] == ["Wi-Fi", "Ethernet 2"]
+        text = app.export_screenshot()
+        for name in ("Wi-Fi", "Ethernet&#160;2", "WAN&#160;Miniport&#160;(IPv6)"):
+            assert name in text, name
+        await pilot.press("down")
+        assert "Ethernet 2" in str(screen.query_one("#detail").render())
+        await pilot.press("1")
+        await pilot.pause()
+    assert chosen == ["\\Device\\NPF_{9F8E7D6C-3333-4E3B-9F1A-2C3D4E5F6A7B}"]
+    store.close()

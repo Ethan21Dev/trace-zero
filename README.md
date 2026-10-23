@@ -76,7 +76,7 @@ The executables are not code-signed: Windows SmartScreen asks you to confirm (*M
 Each GitHub release also carries the Python package (`trace_zero-X.Y.Z-py3-none-any.whl`):
 
 ```bash
-pipx install ./trace_zero-0.1.2-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
+pipx install ./trace_zero-0.1.3-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
 ```
 
 It is not on PyPI yet; the release workflow publishes there once PyPI publishing is enabled

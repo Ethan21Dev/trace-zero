@@ -44,6 +44,7 @@ from trace_zero.ui.screens.dialogs import (
     ConfirmScreen,
     FilterScreen,
     HelpScreen,
+    InterfaceScreen,
     InvestigationsScreen,
     NoteScreen,
     OpenCaptureScreen,
@@ -1712,17 +1713,11 @@ class MainScreen(Screen):
         if error:
             self.app.notify(error, title="cannot list interfaces", severity="error", timeout=12)
             return
-        hotkeys = "123456789abcdeghijklmnoprstuvwxyz"
-        options = [(i.name, hotkeys[n] if n < len(hotkeys) else "", clean(i.label, 64)) for n, i in enumerate(interfaces[:60])]
-
         def picked(name: str | None) -> None:
             if name:
                 self._ask_capture_filter(tool, name)
 
-        self.app.push_screen(
-            ChoiceScreen(f"CAPTURE WITH {tool.kind.upper()}", "Interface. Only traffic to and from this machine (plus broadcast/multicast) is recorded.", options),
-            picked,
-        )
+        self.app.push_screen(InterfaceScreen(tool.kind, interfaces[:60]), picked)
 
     def _ask_capture_filter(self, tool, interface: str) -> None:
         cfg = self.session.config

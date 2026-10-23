@@ -368,7 +368,7 @@ class ChoiceScreen(ModalScreen[str | None]):
     """Pick one option with up/down + enter, or its hotkey."""
 
     DEFAULT_CSS = _css("ChoiceScreen") + """
-    ChoiceScreen > #frame { width: 70; }
+    ChoiceScreen > #frame { width: 94%; max-width: 110; }
     ChoiceScreen VirtualTable { height: auto; max-height: 14; margin-top: 1; }
     """
     BINDINGS = [Binding("escape", "cancel", "cancel")]
@@ -404,6 +404,76 @@ class ChoiceScreen(ModalScreen[str | None]):
     @on(VirtualTable.Activated)
     def activated(self, event: VirtualTable.Activated) -> None:
         self.dismiss(event.key)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class InterfaceScreen(ModalScreen[str | None]):
+    """Pick a capture interface. Friendly names first: on Windows the device names are long IDs."""
+
+    DEFAULT_CSS = _css("InterfaceScreen") + """
+    InterfaceScreen > #frame { width: 94%; max-width: 150; }
+    InterfaceScreen VirtualTable { height: auto; max-height: 22; margin-top: 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "cancel")]
+    HOTKEYS = "123456789abcdeghijklmnoprstuvwxyz"
+
+    def __init__(self, tool_kind: str, interfaces: list) -> None:
+        super().__init__()
+        self.tool_kind = tool_kind
+        # The adapters people actually capture on first; otherwise the tool's own order.
+        likely = ("wi-fi", "wifi", "wlan", "wireless", "ethernet", "eth", "en0", "en1", "wl")
+        self.interfaces = sorted(interfaces, key=lambda i: not i.friendly.lower().startswith(likely))
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="frame") as frame:
+            frame.border_title = f"CAPTURE WITH {self.tool_kind.upper()}"
+            yield Static(
+                "Pick the adapter you use to reach the network - usually Wi-Fi or Ethernet. "
+                "Only traffic to and from this computer (plus broadcast/multicast) is recorded.",
+                classes="hint",
+                markup=False,
+            )
+            yield VirtualTable([Col("KEY", 4), Col("ADAPTER", min_width=24), Col("DEVICE NAME", min_width=20)], id="interfaces")
+            yield Static("", id="detail", classes="hint", markup=False)
+            yield Static("up/down choose  \u2502  enter or key capture on it  \u2502  esc cancel", classes="hint")
+
+    def on_mount(self) -> None:
+        table = self.query_one(VirtualTable)
+        ifaces = self.interfaces
+        keys = self.HOTKEYS
+
+        def row(i: int) -> list:
+            friendly = ifaces[i].friendly
+            device = ifaces[i].name if friendly != ifaces[i].name else ""
+            return [Text(keys[i] if i < len(keys) else "", style=theme.S_CYAN), Text(clean(friendly, 120), style=theme.S_TEXT), Text(clean(device, 120), style=theme.S_DIM)]
+
+        table.set_data(len(ifaces), row, lambda i: i, notify=False)
+        table.styles.height = min(len(ifaces), 20) + 1
+        table.focus()
+        self._show_detail(0)
+
+    def _show_detail(self, i: int | None) -> None:
+        if i is None or not 0 <= i < len(self.interfaces):
+            return
+        iface = self.interfaces[i]
+        self.query_one("#detail", Static).update(clean(f"selected: {iface.friendly}  -  {iface.name}", 300))
+
+    @on(VirtualTable.Highlighted)
+    def highlighted(self, event: VirtualTable.Highlighted) -> None:
+        self._show_detail(event.key)
+
+    def on_key(self, event) -> None:
+        if event.character and event.character in self.HOTKEYS:
+            i = self.HOTKEYS.index(event.character)
+            if i < len(self.interfaces):
+                event.stop()
+                self.dismiss(self.interfaces[i].name)
+
+    @on(VirtualTable.Activated)
+    def activated(self, event: VirtualTable.Activated) -> None:
+        self.dismiss(self.interfaces[int(event.key)].name)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

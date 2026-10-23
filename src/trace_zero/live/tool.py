@@ -56,6 +56,14 @@ class Interface:
     def label(self) -> str:
         return f"{self.name}  {self.description}".strip()
 
+    @property
+    def friendly(self) -> str:
+        """The human name: Windows lists '\\Device\\NPF_{GUID} (Wi-Fi)', so the part in parentheses."""
+        desc = self.description.strip()
+        if desc.startswith("(") and desc.endswith(")"):
+            desc = desc[1:-1].strip()
+        return desc or self.name
+
 
 def find_tool(configured: str | os.PathLike[str] | None = None) -> CaptureTool | None:
     """dumpcap if available, else tcpdump. ``configured`` is an explicit path from the config."""
