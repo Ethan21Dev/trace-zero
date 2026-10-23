@@ -46,6 +46,8 @@ class LiveCapture:
         self.config = config
         self.follower = CaptureFollower(path, config.limits)
         self.process = process  # live.tool.CaptureProcess when TRACE//ZERO started the tool
+        # This computer's addresses, known when TRACE//ZERO started the capture on a connected adapter.
+        self.local_addresses = frozenset(getattr(process, "local_addresses", ()) or ())
         self.provisional_sha = "live:" + uuid.uuid4().hex
         self.started_at = time.time()
         self.interval = MIN_INTERVAL

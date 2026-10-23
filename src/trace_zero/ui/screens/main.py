@@ -1718,11 +1718,12 @@ class MainScreen(Screen):
             return
         def picked(name: str | None) -> None:
             if name:
-                self._ask_capture_filter(tool, name)
+                chosen = next((i for i in interfaces if i.name == name), None)
+                self._ask_capture_filter(tool, name, chosen.addresses if chosen is not None else ())
 
         self.app.push_screen(InterfaceScreen(tool.kind, interfaces[:60]), picked)
 
-    def _ask_capture_filter(self, tool, interface: str) -> None:
+    def _ask_capture_filter(self, tool, interface: str, addresses: tuple[str, ...] = ()) -> None:
         cfg = self.session.config
 
         def got(bpf: str | None) -> None:
@@ -1736,7 +1737,9 @@ class MainScreen(Screen):
             stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
             ext = "pcapng" if tool.kind == "dumpcap" else "pcap"
             out = Path(cfg.export_dir).expanduser() / f"live-{slug(interface)}-{stamp}.{ext}"
-            proc = CaptureProcess(tool, interface, out, default_data_dir() / "capture-tool.log", bpf, cfg.limits.max_packets, cfg.limits.max_file_mb)
+            proc = CaptureProcess(
+                tool, interface, out, default_data_dir() / "capture-tool.log", bpf, cfg.limits.max_packets, cfg.limits.max_file_mb, addresses
+            )
             self.busy = "STARTING CAPTURE"
             self._refresh_status()
             self._capture_start_worker(proc)

@@ -228,12 +228,15 @@ class Session:
         self.custody_warnings: list[str] = []
         # Live mode: the followed capture while it is still being written.
         self.live: LiveCapture | None = None
+        # Addresses of this computer, known only for captures TRACE//ZERO recorded here.
+        self.local_addresses: frozenset[str] = frozenset()
         # Offline reference data (MAC vendors, geolocation/ASN) - optional, user-supplied files.
         self.enrichment, self.enrichment_problems = Enrichment.from_paths(config.oui_path, list(config.mmdb_paths))
 
     # -- capture lifecycle -------------------------------------------------------
     def attach(self, loaded: LoadedCapture) -> None:
         self.capture = loaded
+        self.local_addresses = frozenset()  # a file opened from disk may come from any computer
         idx = loaded.index
         self.filter = None
         self.view = idx.view(None, key="")
@@ -264,6 +267,7 @@ class Session:
     # -- live mode ---------------------------------------------------------------------
     def start_live(self, live: LiveCapture) -> None:
         self.live = live
+        self.local_addresses = live.local_addresses
         self.store.log(self.investigation.id, "live", f"live mode started: {live.describe()}; provisional id {live.provisional_sha}")
 
     def apply_live(self, update: LiveUpdate) -> None:
@@ -295,7 +299,9 @@ class Session:
         self.live = None
         moved = self.store.rekey_capture(self.investigation.id, live.provisional_sha, final.sha) if live else 0
         flt_text = self.filter.text if self.filter is not None and self.filter.frame_set is None else ""
+        local = live.local_addresses if live else frozenset()
         self.attach(final)
+        self.local_addresses = local  # the finished file is still this computer's recording
         r = final.result
         self.store.log(
             self.investigation.id,

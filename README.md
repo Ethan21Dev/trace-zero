@@ -76,7 +76,7 @@ The executables are not code-signed: Windows SmartScreen asks you to confirm (*M
 Each GitHub release also carries the Python package (`trace_zero-X.Y.Z-py3-none-any.whl`):
 
 ```bash
-pipx install ./trace_zero-0.1.4-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
+pipx install ./trace_zero-0.1.5-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
 ```
 
 It is not on PyPI yet; the release workflow publishes there once PyPI publishing is enabled
@@ -266,6 +266,25 @@ lists, never shell strings; packet-count and file-size limits come from `[limits
 traffic between other hosts (a mirror port or tap) only on networks you are authorised to
 monitor, with your own tooling, and follow its file. Permissions for `dumpcap`/`tcpdump` are
 covered in [docs/SETUP.md](docs/SETUP.md#live-capture-permissions).
+
+### What is this address?
+
+Select any host (`h`, arrow keys) and the inspector's **WHAT IS THIS** section explains it in
+plain language, from the capture alone:
+
+* **is**: THIS COMPUTER (for live captures recorded here, on the adapter marked CONNECTED), ROUTER
+  (the hardware address all internet traffic goes through), a device on your network, an internet
+  server, or a special address - broadcast, device discovery (mDNS, SSDP), Windows name lookups
+  (LLMNR) and so on - with what it is for. For a file, the address in most packets is pointed out
+  as *probably* the computer that recorded it.
+* **name**: names the device announced itself (DHCP), names a DNS answer pointed at it, and names used
+  when a secure (TLS) connection was opened to it, each tagged with how it is known. Run
+  `ipconfig /flushdns` (Windows) before a live capture so name lookups happen again and are captured.
+* **runs**: services it was seen providing, e.g. "website (HTTPS) on TCP port 443" or
+  "name lookups (DNS) - answered 169 time(s)".
+
+Nothing is looked up online; owner and country for internet addresses come only from the optional
+offline databases below.
 
 ### Offline reference data
 

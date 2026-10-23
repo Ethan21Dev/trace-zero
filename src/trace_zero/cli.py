@@ -279,14 +279,19 @@ def _start_capture(args: argparse.Namespace, cfg: Config):
         tool = find_tool(cfg.capture_tool)
         if tool is None:
             raise _CliError("no capture tool found; install Wireshark (dumpcap) or tcpdump")
-        names = [i.name for i in list_interfaces(tool)]
+        from trace_zero.live.route import detect_default_routes, mark_connected
+
+        interfaces = mark_connected(list_interfaces(tool), detect_default_routes())
+        names = [i.name for i in interfaces]
         if args.capture_iface not in names:
             raise _CliError(f"{tool.kind} does not list interface '{args.capture_iface}' (available: {', '.join(names)})")
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         ext = "pcapng" if tool.kind == "dumpcap" else "pcap"
         out = (args.capture_out or Path(cfg.export_dir) / f"live-{slug(args.capture_iface)}-{stamp}.{ext}").expanduser()
+        addresses = next((i.addresses for i in interfaces if i.name == args.capture_iface), ())
         proc = CaptureProcess(
-            tool, args.capture_iface, out, default_data_dir() / "capture-tool.log", args.capture_filter, cfg.limits.max_packets, cfg.limits.max_file_mb
+            tool, args.capture_iface, out, default_data_dir() / "capture-tool.log", args.capture_filter, cfg.limits.max_packets, cfg.limits.max_file_mb,
+            addresses,
         )
         proc.start()
     except CaptureToolError as exc:

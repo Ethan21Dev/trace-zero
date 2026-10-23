@@ -160,9 +160,21 @@ def build_command(tool: CaptureTool, interface: str, out_path: Path, bpf: str = 
 class CaptureProcess:
     """A running capture tool. Its messages go to a log file next to TRACE//ZERO's own log."""
 
-    def __init__(self, tool: CaptureTool, interface: str, out_path: Path, log_path: Path, bpf: str = "", max_packets: int = 0, max_file_mb: int = 0) -> None:
+    def __init__(
+        self,
+        tool: CaptureTool,
+        interface: str,
+        out_path: Path,
+        log_path: Path,
+        bpf: str = "",
+        max_packets: int = 0,
+        max_file_mb: int = 0,
+        local_addresses: tuple[str, ...] = (),
+    ) -> None:
         self.tool = tool
         self.interface = interface
+        # This computer's addresses on that interface (when known), to label it in the analysis.
+        self.local_addresses = tuple(local_addresses)
         self.out_path = Path(out_path)
         self.log_path = Path(log_path)
         self.cmd = build_command(tool, interface, self.out_path, bpf, max_packets, max_file_mb)

@@ -604,7 +604,7 @@ async def test_picker_puts_the_connected_adapter_first_and_selected(tmp_path, mo
     app, s, store = _app(tmp_path)
     async with app.run_test(size=(120, 30)) as pilot:
         main = app.main
-        monkeypatch.setattr(main, "_ask_capture_filter", lambda tool, name: chosen.append(name))
+        monkeypatch.setattr(main, "_ask_capture_filter", lambda tool, name, addresses=(): chosen.append((name, addresses)))
         await pilot.press("F")
         assert isinstance(app.screen, ChoiceScreen)
         await pilot.press("c")
@@ -618,7 +618,7 @@ async def test_picker_puts_the_connected_adapter_first_and_selected(tmp_path, mo
         assert "this computer is 10.0.0.5" in str(screen.query_one("#detail").render())
         await pilot.press("enter")  # the pre-selected (connected) adapter
         await pilot.pause()
-    assert chosen == ["\\Device\\NPF_{11223344-4444-4E3B-9F1A-2C3D4E5F6A7B}"]
+    assert chosen == [("\\Device\\NPF_{11223344-4444-4E3B-9F1A-2C3D4E5F6A7B}", ("10.0.0.5",))]
     store.close()
 
 
@@ -696,3 +696,25 @@ def test_ipconfig_fallback_finds_the_adapter_by_address_in_any_language():
     assert de[0].name == "Drahtlos-LAN-Adapter WLAN"
     wlan = [Interface("\\Device\\NPF_{AA}", "(WLAN)")]
     assert mark_connected(wlan, de)[0].connected
+
+
+def test_live_capture_knows_this_computer_until_another_file_is_opened(tmp_path, sample_pcap):
+    from types import SimpleNamespace
+
+    from trace_zero.analysis.identity import identify
+
+    cfg, store, s = _session(tmp_path)
+    path = tmp_path / "mine.pcap"
+    path.write_bytes(sample_pcap.read_bytes())
+    proc = SimpleNamespace(
+        tool=CaptureTool("dumpcap", "dumpcap"), interface="eth0", bpf="", local_addresses=("10.20.0.12",), running=False, stop=lambda: 0
+    )
+    live = LiveCapture(path, cfg, proc)
+    s.start_live(live)
+    s.apply_live(live.refresh())
+    assert identify("10.20.0.12", s.capture.index, s.local_addresses).role == "THIS COMPUTER"
+    s.finish_live(load_capture(path, cfg))
+    assert s.local_addresses == frozenset({"10.20.0.12"})  # still this computer's recording
+    s.attach(load_capture(sample_pcap, cfg))
+    assert s.local_addresses == frozenset()
+    store.close()

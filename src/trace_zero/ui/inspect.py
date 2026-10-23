@@ -17,6 +17,7 @@ from rich.table import Table
 from rich.text import Text
 
 from trace_zero.analysis.anomaly import RULES, Finding
+from trace_zero.analysis.identity import identify
 from trace_zero.analysis.index import E_BYTES, E_FIRST, E_LAST, E_PKTS, E_PROTOS, H_BYTES_IN, H_BYTES_OUT, H_PKTS_IN, H_PKTS_OUT, WindowStats, classify_ip
 from trace_zero.models import ICMP_TYPES, ICMPV6_TYPES, LINKTYPE_NAMES, PacketRecord, fmt_bytes, fmt_duration, fmt_rel, fmt_ts
 from trace_zero.sanitize import clean, hexdump
@@ -147,12 +148,32 @@ def overview(session: Session) -> Group:
     return doc.render()
 
 
+def _identity(doc: Doc, session: Session, ip: str) -> None:
+    """WHAT IS THIS: role, names and services in plain language (from the capture, nothing looked up)."""
+    ident = identify(ip, session.capture.index, getattr(session, "local_addresses", frozenset()))
+    doc.section("WHAT IS THIS", "from this capture; nothing looked up online")
+    doc.kv("is", ident.role, theme.S_CYAN_B)
+    if ident.explanation:
+        doc.kv("meaning", ident.explanation)
+    if ident.names:
+        for n, (name, how) in enumerate(ident.names):
+            value = Text.assemble((clean(name, 120), theme.S_GREEN if n == 0 else theme.S_TEXT), (f"  ({how})", theme.S_DIM))
+            doc.kv("name" if n == 0 else "also", value)
+    elif ident.role in ("INTERNET SERVER", "DEVICE ON YOUR NETWORK"):
+        doc.kv("name", "not seen in this capture", theme.S_DIM)
+    for n, svc in enumerate(ident.services[:6]):
+        doc.kv("runs" if n == 0 else "", svc)
+    for note in ident.notes:
+        doc.kv("note", note, theme.S_AMBER if note.startswith("probably") else theme.S_DIM)
+
+
 def host(session: Session, ip: str, stats: WindowStats | None) -> Group:
     doc = Doc()
     idx = session.capture.index
     meta = idx.hosts.get(ip)
     doc.section(f"HOST {ip}")
     doc.kv("scope", classify_ip(ip))
+    _identity(doc, session, ip)
     cursor = session.timeline.cursor if session.timeline else None
     w = stats.hosts.get(ip) if stats else None
     doc.section("IN WINDOW", "observed" + (", filtered" if session.filter else ""))
@@ -199,8 +220,8 @@ def host(session: Session, ip: str, stats: WindowStats | None) -> Group:
             doc.kv("JA4 sent", ", ".join(f"{fp} \u00d7{n}" for fp, n in meta.tls_client_fps.most_common(3)))
         if meta.tls_server_fps:
             doc.kv("JA3S sent", ", ".join(f"{fp} \u00d7{n}" for fp, n in meta.tls_server_fps.most_common(3)))
-        doc.dim("Only metadata present in the capture is shown. Names come from")
-        doc.dim("DNS answers, DHCP host-name options or TLS handshakes observed here.")
+        doc.dim("Only metadata present in the capture is shown. Names come from DNS answers,")
+        doc.dim("names devices announce (DHCP) and secure-connection (TLS) names seen here.")
     enrich = getattr(session, "enrichment", None)
     if enrich is not None and enrich.active:
         rows = enrich.describe_host(ip, list(meta.macs) if meta else [])
