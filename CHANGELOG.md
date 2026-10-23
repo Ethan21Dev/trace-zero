@@ -4,7 +4,7 @@ All notable changes to TRACE//ZERO. Versions follow [Semantic Versioning](https:
 
 ## [1.0.0] - 2026-10-23
 
-First public release.
+First public release - made by Ethan21Dev.
 
 TRACE//ZERO is a keyboard-driven terminal tool for looking at network traffic: open a
 PCAP/PCAPNG capture, or record your own computer's traffic live, then explore it on a timeline,
