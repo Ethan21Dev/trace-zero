@@ -1,0 +1,51 @@
+name: Bug report
+description: Something does not work as described
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not attach captures (.pcap / .pcapng) of a real network.** They can contain private
+        information about you and others. Reproduce with the sample (`trace-zero --generate-sample s.pcapng --format pcapng`)
+        or describe the traffic instead. Security problems: use *Security -> Report a vulnerability*, not an issue.
+  - type: input
+    id: version
+    attributes:
+      label: TRACE//ZERO version
+      description: "`trace-zero --version`, or the version in the release file name"
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: ["Windows 11", "Windows 10", "macOS", "Linux", "WSL", "Other"]
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options: ["Downloaded executable", "pip / pipx", "From source"]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Start TRACE//ZERO\n2. Press Shift+F, then c\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: messages
+    attributes:
+      label: Messages or log
+      description: Error text shown on screen, or the end of `trace-zero.log` (Windows `%LOCALAPPDATA%\trace-zero\`, Linux `~/.local/share/trace-zero/`). Remove anything private.
+      render: text

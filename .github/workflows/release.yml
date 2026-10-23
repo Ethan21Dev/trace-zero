@@ -119,9 +119,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4  # for CHANGELOG.md
       - uses: actions/download-artifact@v4
         with:
           path: artifacts/
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          printf '\n---\nDownloads: pick the file for your system below and check it against `SHA256SUMS`.\n' >> notes.md
+          cat notes.md
       - name: Create the release with binaries, packages and SHA256SUMS
         env:
           GH_TOKEN: ${{ github.token }}
@@ -134,5 +145,6 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --title "TRACE//ZERO $GITHUB_REF_NAME" --generate-notes --verify-tag
+            if [ "$(grep -c '[^[:space:]]' notes.md)" -gt 2 ]; then notes=(--notes-file notes.md); else notes=(--generate-notes); fi
+            gh release create "$GITHUB_REF_NAME" upload/* --repo "$GITHUB_REPOSITORY" --title "TRACE//ZERO $GITHUB_REF_NAME" "${notes[@]}" --verify-tag
           fi

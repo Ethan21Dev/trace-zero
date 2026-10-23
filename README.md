@@ -2,6 +2,10 @@
 
 **EVERY PACKET LEAVES A TRACE.**
 
+[![CI](https://github.com/Ethan21Dev/trace-zero/actions/workflows/ci.yml/badge.svg)](https://github.com/Ethan21Dev/trace-zero/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Ethan21Dev/trace-zero)](https://github.com/Ethan21Dev/trace-zero/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 TRACE//ZERO is a keyboard-driven terminal instrument for network forensics.
 Open a PCAP or PCAPNG capture - or follow one while it is being recorded - scrub through it with a deterministic time machine,
 watch hosts and links appear on a network map as the cursor moves, follow reassembled
@@ -14,6 +18,31 @@ keep triage, notes, bookmarks and hashed exports in a persistent investigation.
 `scripts/capture_screenshots.py` (Textual's own SVG export, real keystrokes, synthetic sample capture).</sub>
 
 ---
+
+## Quick start
+
+1. **Download** the file for your computer from the
+   [latest release](https://github.com/Ethan21Dev/trace-zero/releases/latest):
+   `trace-zero-…-windows-x86_64.exe`, `…-macos-arm64` or `…-linux-x86_64`. No Python needed.
+2. **Run it.** Windows: double-click it; if SmartScreen appears, choose *More info*, *Run anyway*
+   (the file is not code-signed). macOS / Linux: see [Standalone executable](#standalone-executable).
+3. On the start screen, choose:
+   - **Open a capture file** (`o`) - a `.pcap` / `.pcapng` you already have, or
+   - **Start live capture** (`Shift+F`) - record your own computer's traffic. This needs
+     [Wireshark](https://www.wireshark.org/download.html) installed once (on Windows keep *Npcap*
+     ticked); pick the adapter marked **CONNECTED** and press `enter`.
+4. Press `h` and walk through the hosts with the arrow keys: the **WHAT IS THIS** panel explains
+   each address. `?` shows every key.
+
+No capture yet? `trace-zero --generate-sample sample.pcapng --format pcapng` writes a safe,
+synthetic one to explore.
+
+## Responsible use
+
+Only capture traffic on networks and devices you own or are explicitly allowed to monitor; in
+many places recording other people's communications without permission is illegal. TRACE//ZERO's
+own live capture is deliberately limited to your computer's traffic (promiscuous mode is always
+off), and captures can contain private information - store and share them with care.
 
 ## What it is - and is not
 
@@ -66,8 +95,8 @@ chmod +x trace-zero-*-linux-x86_64 && ./trace-zero-*-linux-x86_64 --version
 ```
 
 On Windows you can simply double-click the `.exe`: the start screen has buttons (and keys) for
-opening a capture (`o`) and for live mode (`Shift+F` - a capital F; lowercase `f` is findings), and the file browser starts in your Downloads folder (then in the folder you
-used last), with quick jumps to Desktop, Documents, home, the exports folder and every drive.
+opening a capture (`o`) and for live mode (`Shift+F` - a capital F; lowercase `f` is findings),
+and the file browser starts in your Downloads folder (then in the folder you used last), with quick jumps to Desktop, Documents, home, the exports folder and every drive.
 The executables are not code-signed: Windows SmartScreen asks you to confirm (*More info*,
 *Run anyway*), and on macOS run `xattr -d com.apple.quarantine` on the file first.
 
@@ -76,7 +105,7 @@ The executables are not code-signed: Windows SmartScreen asks you to confirm (*M
 Each GitHub release also carries the Python package (`trace_zero-X.Y.Z-py3-none-any.whl`):
 
 ```bash
-pipx install ./trace_zero-0.1.5-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
+pipx install ./trace_zero-1.0.0-py3-none-any.whl    # or: python -m pip install ./trace_zero-...whl
 ```
 
 It is not on PyPI yet; the release workflow publishes there once PyPI publishing is enabled
@@ -389,15 +418,19 @@ python scripts/build_binary.py               # PyInstaller single-file build + o
 The test suite never touches the network: a fixture makes any scapy send/ARP call fail.
 When `tshark` is installed, Wireshark filter translations are cross-checked against it.
 
-Releasing: bump `__version__` in `src/trace_zero/__init__.py`, tag `vX.Y.Z` and push the tag.
-The release workflow refuses a tag that does not match the version. PyPI publishing is off
+Releasing: bump `__version__` in `src/trace_zero/__init__.py`, add a `CHANGELOG.md` section,
+tag `vX.Y.Z` and push the tag. The release workflow refuses a tag that does not match the
+version and uses the changelog section as the release notes. PyPI publishing is off
 until a one-time setup: register this repository as a trusted publisher for `trace-zero` on
 pypi.org (workflow `release.yml`, environment `pypi`), create the `pypi` environment in the
 repository settings, and set the repository variable `PUBLISH_TO_PYPI` to `true`.
 
 Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Troubleshooting: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) - please never attach captures of real networks.
+Security issues: report privately, see [SECURITY.md](SECURITY.md).
+Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE). Copyright (c) 2026 Ethan21Dev.
