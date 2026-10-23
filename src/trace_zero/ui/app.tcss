@@ -54,7 +54,36 @@ Screen {
 
 #view-empty {
     height: 1fr;
-    content-align: center middle;
+    align: center middle;
+}
+
+#splash {
+    width: auto;
+    height: auto;
+}
+
+#start-buttons {
+    width: auto;
+    height: auto;
+    margin-top: 1;
+}
+
+#start-buttons Button {
+    margin: 0 1;
+    background: #0e1112;
+    color: #c3cacd;
+    border: tall #21767b;
+}
+
+#start-buttons Button:focus {
+    background: #123336;
+    color: #e6f7f8;
+    border: tall #3fd0d8;
+    text-style: bold;
+}
+
+#start-buttons Button:hover {
+    background: #123336;
 }
 
 #view-map {

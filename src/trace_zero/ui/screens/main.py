@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from bisect import bisect_left
 from functools import partial
@@ -14,7 +15,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import ContentSwitcher, Static
+from textual.widgets import Button, ContentSwitcher, Static
 from textual.worker import Worker, get_current_worker
 
 from trace_zero import PRODUCT, TAGLINE, custody
@@ -59,6 +60,7 @@ log = logging.getLogger("trace_zero")
 COMPACT_WIDTH = 130
 MIN_W, MIN_H = 60, 16
 SYNC_FILTER_LIMIT = 50_000
+NO_CAPTURE_HINT = "no capture yet: press o to open a capture file, or Shift+F (capital F) to start live capture"
 
 HOST_COLS = [Col("HOST"), Col("PKTS", 7, "right"), Col("BYTES", 8, "right")]
 PEER_COLS = [Col("", 2), Col("PEER / LINK"), Col("PKTS →/←", 13, "right"), Col("BYTES", 9, "right"), Col("PROTO", 12), Col("BEFORE CUR", 10, "right")]
@@ -81,13 +83,13 @@ def _splash() -> Text:
     t.append(f"{PRODUCT}\n", theme.S_CYAN_B)
     t.append(f"{TAGLINE}\n\n", theme.S_FAINT)
     for key, label in (
-        ("o", "open a PCAP / PCAPNG capture"),
-        ("F", "live: capture on a network interface, or follow a growing capture file"),
+        ("o", "open a PCAP / PCAPNG capture file"),
+        ("Shift+F", "live: capture on a network interface, or follow a growing capture file"),
         ("l", "investigations"),
         ("?", "keyboard reference"),
         ("q", "quit"),
     ):
-        t.append(key, theme.S_CYAN)
+        t.append(f"{key:>7}", theme.S_CYAN)
         t.append(f"  {label}\n", theme.S_DIM)
     t.append("\nread-only evidence │ passive live capture │ nothing leaves this machine", theme.S_FAINT)
     return t
@@ -196,7 +198,11 @@ class MainScreen(Screen):
             with Vertical(id="center-panel", classes="panel"):
                 yield Static(id="tabs")
                 with ContentSwitcher(initial="view-empty", id="switcher"):
-                    yield Static(_splash(), id="view-empty")
+                    with Vertical(id="view-empty"):
+                        yield Static(_splash(), id="splash")
+                        with Horizontal(id="start-buttons"):
+                            yield Button("Open a capture file  (o)", id="btn-open")
+                            yield Button("Start live capture  (Shift+F)", id="btn-live")
                     with Vertical(id="view-map"):
                         yield MapCanvas(id="map-canvas")
                         yield VirtualTable(PEER_COLS, id="peers-table", empty_text="no links in window")
@@ -222,6 +228,8 @@ class MainScreen(Screen):
         self._refresh_chrome()
         self._refresh_inspector()
         self._refresh_tabs()
+        if self.session.capture is None and not self.initial_live and not self.initial_capture:
+            self.query_one("#btn-open", Button).focus()
         for problem in self.session.enrichment_problems:
             self.app.notify(problem, title="reference data not loaded", severity="warning", timeout=8)
         if self.initial_live:
@@ -475,7 +483,7 @@ class MainScreen(Screen):
         status = self.query_one(StatusBar)
         keys: list[tuple[str, str]]
         if s.capture is None:
-            keys = [("o", "open"), ("F", "live" if s.live is None else "stop live"), ("?", "help"), ("l", "investigations"), ("a", "note"), ("q", "quit")]
+            keys = [("o", "open"), ("Shift+F", "live" if s.live is None else "stop live"), ("?", "help"), ("l", "investigations"), ("a", "note"), ("q", "quit")]
             if self.busy:
                 keys = [("esc", "cancel import")] + keys
             status.set_state(keys=keys, filter_text="", range_text="-", app_status=self.busy or "READY")
@@ -503,7 +511,7 @@ class MainScreen(Screen):
         else:
             keys += [("h n c p f b", "views"), ("w", "mode"), ("+ -", "speed")]
         if s.live is not None:
-            keys += [("F", "stop live")]
+            keys += [("Shift+F", "stop live")]
         keys += [("e", "export"), ("q", "back" if self.history else "quit")]
         lo, hi = tl.window()
         rng = f"{fmt_ts(lo)} → {fmt_ts(hi)} ({fmt_duration(hi - lo)})"
@@ -882,7 +890,7 @@ class MainScreen(Screen):
     def action_view(self, name: str) -> None:
         if name in VIEW_FOCUS:
             if self.session.capture is None and name != "journal":
-                self.app.notify("open a capture first (o)", severity="warning")
+                self.app.notify(NO_CAPTURE_HINT, severity="warning")
                 return
             if self.center_view != name or (self.compact and self.compact_panel != "center"):
                 self._switch_center(name)
@@ -1186,6 +1194,14 @@ class MainScreen(Screen):
 
         self.app.push_screen(self._browser(title="ADD CAPTURE TO TIMELINE"), done)
 
+    @on(Button.Pressed, "#btn-open")
+    def _open_pressed(self) -> None:
+        self.action_open()
+
+    @on(Button.Pressed, "#btn-live")
+    def _live_pressed(self) -> None:
+        self.action_live()
+
     def _browser(self, follow: bool = False, title: str = "OPEN CAPTURE") -> OpenCaptureScreen:
         """File browser starting in the last folder used (never the launcher's System32)."""
         s = self.session
@@ -1206,7 +1222,7 @@ class MainScreen(Screen):
     def action_filter(self) -> None:
         s = self.session
         if s.capture is None:
-            self.app.notify("open a capture first (o)", severity="warning")
+            self.app.notify(NO_CAPTURE_HINT, severity="warning")
             return
         initial = s.filter.text if s.filter is not None and s.filter.frame_set is None else ""
 
@@ -1238,7 +1254,7 @@ class MainScreen(Screen):
         """Compile and apply a filter expression; remembered in the filter history."""
         s = self.session
         if s.capture is None:
-            self.app.notify("open a capture first (o)", severity="warning")
+            self.app.notify(NO_CAPTURE_HINT, severity="warning")
             return
         try:
             flt = s.compile(text)
@@ -1590,7 +1606,7 @@ class MainScreen(Screen):
     def action_export_pcap(self) -> None:
         s = self.session
         if s.capture is None:
-            self.app.notify("open a capture first (o)", severity="warning")
+            self.app.notify(NO_CAPTURE_HINT, severity="warning")
             return
         count = len(s.window_frames())
         if not count:
@@ -1615,7 +1631,7 @@ class MainScreen(Screen):
             self.app.notify("the live capture has no final hash yet: stop it (F) to hash and verify it", severity="warning")
             return
         if self.session.capture is None:
-            self.app.notify("open a capture first (o)", severity="warning")
+            self.app.notify(NO_CAPTURE_HINT, severity="warning")
             return
         self.busy = "VERIFYING"
         self._refresh_status()
@@ -1668,11 +1684,15 @@ class MainScreen(Screen):
             self.app.notify(str(exc), severity="error")
             return
         if tool is None:
-            self.app.notify(
-                "no capture tool found: install Wireshark (dumpcap) or tcpdump, or follow a file written by another program",
-                severity="error",
-                timeout=10,
-            )
+            if sys.platform == "win32":
+                hint = (
+                    "Live capture uses Wireshark's dumpcap, which is not installed. Install Wireshark from "
+                    "https://www.wireshark.org/download.html (keep the Npcap option ticked), then restart TRACE//ZERO. "
+                    "Or follow a capture file another program is writing."
+                )
+            else:
+                hint = "no capture tool found: install Wireshark (dumpcap) or tcpdump, or follow a file written by another program"
+            self.app.notify(hint, title="live capture", severity="error", timeout=20)
             return
         self.busy = "LISTING INTERFACES"
         self._refresh_status()

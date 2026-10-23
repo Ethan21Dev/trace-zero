@@ -54,9 +54,9 @@ async def test_start_screen_offers_live_and_browser_remembers_folder(tmp_path, s
     app = TraceZeroApp(s)
     async with app.run_test(size=(160, 48)) as pilot:
         main = app.main
-        splash = str(main.query_one("#view-empty").render())
-        assert "F  live" in splash and "o  open" in splash
-        assert ("F", "live") in main.query_one("StatusBar").keys
+        splash = str(main.query_one("#splash").render())
+        assert "Shift+F  live" in splash and "o  open" in splash
+        assert ("Shift+F", "live") in main.query_one("StatusBar").keys
         await pilot.press("o")
         browser = app.screen
         assert isinstance(browser, OpenCaptureScreen)
@@ -83,4 +83,35 @@ async def test_start_screen_offers_live_and_browser_remembers_folder(tmp_path, s
         assert store.get_pref("last_folder") == str(sample_pcap.parent)
         await pilot.press("o")
         assert Path(app.screen.query_one("#tree").path) == sample_pcap.parent
+    store.close()
+
+
+async def test_start_screen_buttons_and_lowercase_f_hint(tmp_path):
+    from textual.widgets import Button
+
+    from trace_zero.ui.screens.dialogs import ChoiceScreen
+
+    cfg = Config(db_path=tmp_path / "p.db", export_dir=tmp_path / "exports", cache_dir=tmp_path / "cache")
+    store = Store(cfg.db_path)
+    s = Session(cfg, store, store.open_or_create("buttons"))
+    app = TraceZeroApp(s)
+    async with app.run_test(size=(120, 36)) as pilot:
+        main = app.main
+        assert main.focused is main.query_one("#btn-open", Button)
+        # lowercase f is the findings view; with nothing loaded it explains how to start live mode
+        await pilot.press("f")
+        await pilot.pause()
+        messages = [n.message for n in app._notifications]
+        assert any("Shift+F" in m and "press o" in m for m in messages)
+        # the buttons work with enter and with the mouse
+        await pilot.press("enter")
+        assert isinstance(app.screen, OpenCaptureScreen)
+        await pilot.press("escape")
+        await pilot.click("#btn-live")
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceScreen)
+        await pilot.press("escape")
+        # compact layout (narrow window) still shows them
+    async with TraceZeroApp(s).run_test(size=(90, 30)) as pilot:
+        assert pilot.app.main.query_one("#btn-live", Button).region.width > 0
     store.close()
